@@ -1,6 +1,6 @@
 # Agent Filesystem
 
-Agent Filesystem, or AFS, gives agents a filesystem-shaped way to work with data, without being trapped in one machine's local disk.
+Agent Filesystem (AFS), gives agents a filesystem-shaped way to work with data, without being trapped in one machine's local disk.
 
 The name is an explicit nod to the original Andrew File System (AFS): a shared filesystem built for distributed work. Agent Filesystem borrows that shared-filesystem inspiration and adapts it for agents, with Redis as the persistence and coordination layer.
 
