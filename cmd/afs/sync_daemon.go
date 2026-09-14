@@ -67,9 +67,10 @@ type syncDaemon struct {
 	conflict    *conflictNamer
 	ignore      *syncIgnore
 
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-	done   chan struct{}
+	wg         sync.WaitGroup
+	cancel     context.CancelFunc
+	workCancel context.CancelFunc
+	done       chan struct{}
 }
 
 // newSyncDaemon initializes (but does not start) a daemon for the given
@@ -139,6 +140,7 @@ func newSyncDaemon(cfg syncDaemonConfig) (*syncDaemon, error) {
 	if cfg.Rdb != nil && strings.TrimSpace(cfg.StorageID) != "" && strings.TrimSpace(cfg.SessionID) != "" {
 		d.uploader.mountChangelog(cfg.Rdb, cfg.StorageID, cfg.SessionID, cfg.User, cfg.AgentID, cfg.Label, cfg.AgentVersion)
 	}
+	d.reconciler.recordChange = d.uploader.emitChange
 	d.downloader = newDownloader(cfg.FS, d.reconciler.downloadOut(), cfg.LocalRoot, conflict, echo, cfg.Readonly, log)
 	d.pump = newRemoteSubscriptionPump(cfg.FS, log, stateWriter)
 	return d, nil
@@ -171,6 +173,9 @@ func (d *syncDaemon) start(ctx context.Context, onProgress ProgressFunc, skipRec
 	}
 	dctx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
+	d.reconciler.stopCh = dctx.Done()
+	d.uploader.stopCh = dctx.Done()
+	d.downloader.stopCh = dctx.Done()
 
 	if !skipReconcile {
 		if err := d.validateInitialSyncSafety(dctx); err != nil {
@@ -206,6 +211,11 @@ func (d *syncDaemon) start(ctx context.Context, onProgress ProgressFunc, skipRec
 		return fmt.Errorf("watcher: %w", err)
 	}
 	d.watcher = w
+	// A save stops dequeues immediately but lets active mutations finish.
+	// Its deadline can still cancel these operations while joining them.
+	workCtx, workCancel := context.WithCancel(ctx)
+	d.workCancel = workCancel
+	d.uploader.runContext = workCtx
 
 	// Steady-state goroutines.
 	stateStop := make(chan struct{})
@@ -264,7 +274,10 @@ func (d *syncDaemon) start(ctx context.Context, onProgress ProgressFunc, skipRec
 			case <-dctx.Done():
 				return
 			case <-w.Rescans():
-				if err := d.recoverWatcherOverflow(dctx); err != nil {
+				if dctx.Err() != nil {
+					return
+				}
+				if err := d.recoverWatcherOverflow(workCtx); err != nil {
 					if dctx.Err() != nil {
 						return
 					}
@@ -281,17 +294,23 @@ func (d *syncDaemon) start(ctx context.Context, onProgress ProgressFunc, skipRec
 					}
 				}
 			case <-d.reconciler.fullSweepRequests():
+				if dctx.Err() != nil {
+					return
+				}
 				// Startup has already completed. A deferred recovery can leave
 				// only hidden local entries, which still must be merged safely.
-				if err := d.full.warmStart(dctx, nil); err != nil && !errors.Is(err, context.Canceled) {
+				if err := d.full.warmStart(workCtx, nil); err != nil && !errors.Is(err, context.Canceled) {
 					fmt.Fprintf(os.Stderr, "afs sync: full reconcile failed: %v\n", err)
 					// Preserve the retry guarantee when an overflow scan deferred
 					// an upload and its result woke this ordinary sweep channel.
 					w.requestRescan()
 				}
 			case <-d.reconciler.rootReplaceRequests():
+				if dctx.Err() != nil {
+					return
+				}
 				d.reconciler.suppressLocalEventsDuringRestore(true)
-				if err := d.full.replaceFromRemote(dctx, nil); err != nil {
+				if err := d.full.replaceFromRemote(workCtx, nil); err != nil {
 					d.reconciler.suppressLocalEventsDuringRestore(false)
 					if !errors.Is(err, context.Canceled) {
 						fmt.Fprintf(os.Stderr, "afs sync: checkpoint restore local replace failed: %v\n", err)
@@ -312,6 +331,7 @@ func (d *syncDaemon) start(ctx context.Context, onProgress ProgressFunc, skipRec
 
 	go func() {
 		d.wg.Wait()
+		d.reconciler.asyncWG.Wait()
 		if d.watcher != nil {
 			_ = d.watcher.Close()
 		}
@@ -347,11 +367,33 @@ func (d *syncDaemon) startQueryIndexWorker(ctx context.Context) {
 
 // Stop cancels the daemon context and waits for all goroutines to drain.
 func (d *syncDaemon) Stop() {
+	d.stopWork()
+	d.stopGeneration()
+	<-d.done
+}
+
+// StopForSave preserves the outcome of active mutations, including metadata
+// and their completion results. The save deadline bounds this graceful drain.
+// Even after cancellation, join before inspecting or restarting any workers.
+func (d *syncDaemon) StopForSave(ctx context.Context) {
+	stopDeadline := context.AfterFunc(ctx, d.stopWork)
+	defer stopDeadline()
+	d.stopGeneration()
+	<-d.done
+	d.stopWork()
+}
+
+func (d *syncDaemon) stopWork() {
+	if d.workCancel != nil {
+		d.workCancel()
+	}
+}
+
+func (d *syncDaemon) stopGeneration() {
 	if d.cancel != nil {
 		d.cancel()
 		d.cancel = nil
 	}
-	<-d.done
 }
 
 // Snapshot returns a copy of the current sync state for status reporting.

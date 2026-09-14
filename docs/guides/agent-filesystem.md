@@ -66,6 +66,36 @@ Recovery follows the existing reconciliation and conflict rules. A successful
 local write does not wait for remote upload, so changes can still be lost if the
 local environment disappears before synchronization completes.
 
+Before ending a session that must preserve its changes, stop all application
+writes and all other writers
+to the remote volume, then run:
+
+```bash
+afs vol save --timeout 2m --json <volume-or-mount-directory>
+```
+
+Save covers one complete active sync mount, including changes whose watcher
+events were missed. It applies the mount's ignore rules. Success means the
+included tree's actual file bytes, types, permissions and symlink targets were
+verified against Redis. The JSON result includes the volume, local root, entry
+and file counts, byte count, tree SHA256 and completion time. Save attempts to
+resume normal synchronization after the operation. If resuming fails, save
+returns an error and the mount must be restarted. After a failed save, the
+resumed daemon scans the local tree and retries pending work using the normal
+conflict rules, even if no further watcher event arrives.
+
+Save mutations use the same session History and file-version recording as
+background uploads when the mount has session attribution. Unchanged entries
+and chunk metadata repairs do not add History rows. Changes that finish before
+a later save failure remain in History; retrying does not repeat those rows.
+
+Conflicting local and remote changes, an unstable tree, failed operations, and
+timeout return failure. Some changes may already have reached Redis on failure;
+timeout does not confirm completion or undo work. Save does not create a
+checkpoint, guarantee Redis disk durability, or provide an atomic snapshot
+while writers are active. It requires a writable sync mount and does not apply
+to live FUSE or NFS mounts. Stop writers before retrying a failed save.
+
 Use live mount mode when you specifically need a live filesystem view. On macOS
 AFS uses NFS; on Linux it uses FUSE. Sync mode is usually the friendlier
 default.

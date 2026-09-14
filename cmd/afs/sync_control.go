@@ -23,28 +23,35 @@ const (
 	syncControlResultsDirName    = ".afs-sync/results"
 	syncControlOpCreateExclusive = "create-exclusive"
 	syncControlOpUndelete        = "undelete"
+	syncControlOpSave            = "save"
 	defaultSyncControlTimeout    = 10 * time.Second
 )
 
 type syncControlRequest struct {
-	Version   int    `json:"version"`
-	Operation string `json:"operation"`
-	Path      string `json:"path"`
-	Content   string `json:"content"`
-	VersionID string `json:"version_id,omitempty"`
-	FileID    string `json:"file_id,omitempty"`
-	Ordinal   int64  `json:"ordinal,omitempty"`
+	Version           int    `json:"version"`
+	Operation         string `json:"operation"`
+	Path              string `json:"path"`
+	Content           string `json:"content"`
+	VersionID         string `json:"version_id,omitempty"`
+	FileID            string `json:"file_id,omitempty"`
+	Ordinal           int64  `json:"ordinal,omitempty"`
+	DeadlineUnixMilli int64  `json:"deadline_unix_milli,omitempty"`
+	Volume            string `json:"volume,omitempty"`
+	LocalRoot         string `json:"local_root,omitempty"`
 }
 
 type syncControlResult struct {
-	Version   int    `json:"version"`
-	Operation string `json:"operation"`
-	Path      string `json:"path"`
-	Success   bool   `json:"success"`
-	Bytes     int    `json:"bytes,omitempty"`
-	VersionID string `json:"version_id,omitempty"`
-	SourceID  string `json:"source_id,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Version   int              `json:"version"`
+	Operation string           `json:"operation"`
+	Path      string           `json:"path"`
+	Success   bool             `json:"success"`
+	Bytes     int              `json:"bytes,omitempty"`
+	VersionID string           `json:"version_id,omitempty"`
+	SourceID  string           `json:"source_id,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	Volume    string           `json:"volume,omitempty"`
+	LocalRoot string           `json:"local_root,omitempty"`
+	Save      *syncSaveReceipt `json:"save,omitempty"`
 }
 
 func cmdFS(args []string) error {
@@ -327,39 +334,68 @@ func syncControlResultPath(root, requestID string) string {
 }
 
 func runSyncControlRequest(localRoot string, request syncControlRequest, timeout time.Duration) (syncControlResult, error) {
+	result, err := exchangeSyncControlRequest(localRoot, request, timeout)
+	if err != nil {
+		return syncControlResult{}, err
+	}
+	if !result.Success {
+		if strings.TrimSpace(result.Error) == "" {
+			return syncControlResult{}, fmt.Errorf("%s failed", request.Operation)
+		}
+		return syncControlResult{}, errors.New(result.Error)
+	}
+	return result, nil
+}
+
+// exchangeSyncControlRequest owns file publication, polling and decoding. Save
+// has an absolute deadline and retracts its request on return. Older file
+// operations retain their pending request when the caller stops waiting.
+func exchangeSyncControlRequest(localRoot string, request syncControlRequest, timeout time.Duration) (syncControlResult, error) {
 	requestID, err := randomSuffix()
 	if err != nil {
 		return syncControlResult{}, err
 	}
-	if err := writeSyncControlJSON(syncControlRequestPath(localRoot, requestID), request, 0o600); err != nil {
+	requestPath, resultPath := syncControlRequestPath(localRoot, requestID), syncControlResultPath(localRoot, requestID)
+	isSave := request.Operation == syncControlOpSave
+	resultName := "file operation"
+	timeoutErr := fmt.Errorf("timed out waiting for sync control result for %s", request.Path)
+	if isSave {
+		resultName = "save"
+		timeoutErr = errors.New("timed out waiting for save; completion is unconfirmed and partial work may have occurred")
+		defer func() { _ = os.Remove(requestPath); _ = os.Remove(resultPath) }()
+	}
+	if err := writeSyncControlJSON(requestPath, request, 0o600); err != nil {
 		return syncControlResult{}, err
 	}
 
-	resultPath := syncControlResultPath(localRoot, requestID)
 	deadline := time.Now().Add(timeout)
+	if isSave {
+		deadline = time.UnixMilli(request.DeadlineUnixMilli)
+	}
 	for {
+		if isSave && !time.Now().Before(deadline) {
+			return syncControlResult{}, timeoutErr
+		}
 		data, err := os.ReadFile(resultPath)
 		if err == nil {
 			_ = os.Remove(resultPath)
 			var result syncControlResult
 			if err := json.Unmarshal(data, &result); err != nil {
-				return syncControlResult{}, fmt.Errorf("parse file operation result: %w", err)
-			}
-			if !result.Success {
-				if strings.TrimSpace(result.Error) == "" {
-					return syncControlResult{}, fmt.Errorf("%s failed", request.Operation)
-				}
-				return syncControlResult{}, errors.New(result.Error)
+				return syncControlResult{}, fmt.Errorf("parse %s result: %w", resultName, err)
 			}
 			return result, nil
 		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return syncControlResult{}, err
 		}
 		if time.Now().After(deadline) {
-			return syncControlResult{}, fmt.Errorf("timed out waiting for sync control result for %s", request.Path)
+			return syncControlResult{}, timeoutErr
 		}
-		time.Sleep(25 * time.Millisecond)
+		delay := 25 * time.Millisecond
+		if isSave && time.Until(deadline) < delay {
+			delay = time.Until(deadline)
+		}
+		time.Sleep(delay)
 	}
 }
 

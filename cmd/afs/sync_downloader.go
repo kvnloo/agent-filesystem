@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/redis/agent-filesystem/mount/client"
 )
@@ -62,6 +64,7 @@ type downloadResult struct {
 
 // downloader runs in its own goroutine, draining ops from the reconciler.
 type downloader struct {
+	stopCh   <-chan struct{}
 	fs       client.Client
 	results  chan<- downloadResult
 	root     string // local workspace root
@@ -92,7 +95,7 @@ func (d *downloader) run(ctx context.Context, in <-chan downloadOp) {
 		case <-ctx.Done():
 			return
 		case op, ok := <-in:
-			if !ok {
+			if !ok || ctx.Err() != nil {
 				return
 			}
 			d.process(ctx, op)
@@ -101,6 +104,9 @@ func (d *downloader) run(ctx context.Context, in <-chan downloadOp) {
 }
 
 func (d *downloader) process(ctx context.Context, op downloadOp) {
+	if d.cancelled(ctx, op) {
+		return
+	}
 	switch op.Kind {
 	case opDownloadFile:
 		d.processFile(ctx, op)
@@ -133,6 +139,9 @@ func (d *downloader) processFile(ctx context.Context, op downloadOp) {
 		d.send(downloadResult{Op: op, Err: fmt.Errorf("stat remote %s: %w", op.Path, err)})
 		return
 	}
+	if d.cancelled(ctx, op) {
+		return
+	}
 	if stat == nil {
 		// Treat as a delete: the inode vanished between the invalidation
 		// dispatch and our follow-up read.
@@ -140,8 +149,8 @@ func (d *downloader) processFile(ctx context.Context, op downloadOp) {
 			d.send(downloadResult{Op: op, Skipped: true})
 			return
 		}
-		d.removeLocalFile(op)
-		d.send(downloadResult{Op: downloadOp{Kind: opDownloadDelete, Path: op.Path, AbsPath: op.AbsPath, StoredEntry: op.StoredEntry, HasStored: op.HasStored}})
+		op.Kind = opDownloadDelete
+		d.processDelete(ctx, op)
 		return
 	}
 	if stat.Type == "dir" {
@@ -164,6 +173,9 @@ func (d *downloader) processFile(ctx context.Context, op downloadOp) {
 		d.send(downloadResult{Op: op, Err: fmt.Errorf("read remote %s: %w", op.Path, err)})
 		return
 	}
+	if d.cancelled(ctx, op) {
+		return
+	}
 	hash := sha256Hex(data)
 	mode := stat.Mode
 	if d.readonly {
@@ -182,18 +194,12 @@ func (d *downloader) processFile(ctx context.Context, op downloadOp) {
 		return
 	}
 
-	var conflictPath string
-	if op.Conflict {
-		moved, err := moveLocalToConflict(d.conflict, op.AbsPath)
-		if err != nil {
-			d.send(downloadResult{Op: op, Err: fmt.Errorf("preserve conflict copy %s: %w", op.Path, err)})
-			return
-		}
-		conflictPath = moved
-	}
-
-	if err := d.atomicWriteFile(op.AbsPath, data, mode); err != nil {
-		d.send(downloadResult{Op: op, Err: fmt.Errorf("write local %s: %w", op.Path, err)})
+	conflictPath, err := d.writeLocalFile(ctx, op, mode, func(file *os.File) error {
+		_, err := file.Write(data)
+		return err
+	})
+	if err != nil {
+		d.send(downloadResult{Op: op, Skipped: errors.Is(err, errSyncDownloadLocalChanged), Err: fmt.Errorf("write local %s: %w", op.Path, err)})
 		return
 	}
 	d.echo.markFile(op.Path, hash)
@@ -250,13 +256,16 @@ func (d *downloader) processChunkedFile(ctx context.Context, op downloadOp) {
 		d.send(downloadResult{Op: op, Err: fmt.Errorf("stat remote %s: %w", op.Path, err)})
 		return
 	}
+	if d.cancelled(ctx, op) {
+		return
+	}
 	if stat == nil {
 		if !local.unchanged(op.AbsPath) {
 			d.send(downloadResult{Op: op, Skipped: true})
 			return
 		}
-		d.removeLocalFile(op)
-		d.send(downloadResult{Op: downloadOp{Kind: opDownloadDelete, Path: op.Path, AbsPath: op.AbsPath, StoredEntry: op.StoredEntry, HasStored: op.HasStored}})
+		op.Kind = opDownloadDelete
+		d.processDelete(ctx, op)
 		return
 	}
 
@@ -264,6 +273,10 @@ func (d *downloader) processChunkedFile(ctx context.Context, op downloadOp) {
 	chunkData, err := d.fs.ReadChunks(ctx, remotePath, op.DirtyChunks, op.ChunkSize)
 	if err != nil {
 		d.send(downloadResult{Op: op, Err: fmt.Errorf("read chunks %s: %w", op.Path, err)})
+		return
+	}
+
+	if d.cancelled(ctx, op) {
 		return
 	}
 	if !local.unchanged(op.AbsPath) {
@@ -287,38 +300,41 @@ func (d *downloader) processChunkedFile(ctx context.Context, op downloadOp) {
 		return
 	}
 
-	// Ensure parent directory exists.
-	if err := os.MkdirAll(filepath.Dir(op.AbsPath), 0o755); err != nil {
-		d.send(downloadResult{Op: op, Err: err})
-		return
-	}
-
-	// Patch the local file at chunk offsets.
-	f, err := os.OpenFile(op.AbsPath, os.O_RDWR|os.O_CREATE, fs.FileMode(mode&0o7777))
-	if err != nil {
-		d.send(downloadResult{Op: op, Err: fmt.Errorf("open %s: %w", op.Path, err)})
-		return
-	}
-	for idx, data := range chunkData {
-		offset := int64(idx) * int64(op.ChunkSize)
-		if _, err := f.WriteAt(data, offset); err != nil {
-			_ = f.Close()
-			d.send(downloadResult{Op: op, Err: fmt.Errorf("write chunk %d of %s: %w", idx, op.Path, err)})
-			return
+	// Patch a sibling file so cancellation cannot leave partial local bytes.
+	_, err = d.writeLocalFile(ctx, op, mode, func(file *os.File) error {
+		local, err := os.OpenFile(op.AbsPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			defer local.Close()
+			info, err := local.Stat()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("chunk destination is not a regular file")
+			}
+			if _, err := io.Copy(file, local); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
-	}
-	if err := f.Truncate(op.FileSize); err != nil {
-		_ = f.Close()
-		d.send(downloadResult{Op: op, Err: fmt.Errorf("truncate %s: %w", op.Path, err)})
+		for idx, data := range chunkData {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := file.WriteAt(data, int64(idx)*int64(op.ChunkSize)); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return file.Truncate(op.FileSize)
+	})
+	if err != nil {
+		d.send(downloadResult{Op: op, Skipped: errors.Is(err, errSyncDownloadLocalChanged), Err: err})
 		return
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		d.send(downloadResult{Op: op, Err: err})
-		return
-	}
-	_ = f.Close()
-	_ = os.Chmod(op.AbsPath, fs.FileMode(mode&0o7777))
 
 	d.echo.markFile(op.Path, hash)
 	d.sendFileResult(op, stat, hash, "", mode, op.FileSize)
@@ -409,6 +425,9 @@ func (d *downloader) processSymlink(ctx context.Context, op downloadOp) {
 		}
 		op.Symlink = target
 	}
+	if d.cancelled(ctx, op) {
+		return
+	}
 	if !local.unchanged(op.AbsPath) {
 		d.send(downloadResult{Op: op, Skipped: true})
 		return
@@ -421,27 +440,52 @@ func (d *downloader) processSymlink(ctx context.Context, op downloadOp) {
 		d.send(downloadResult{Op: op, Skipped: true})
 		return
 	}
+	if err := os.MkdirAll(filepath.Dir(op.AbsPath), 0o755); err != nil {
+		d.send(downloadResult{Op: op, Err: err})
+		return
+	}
+	if d.cancelled(ctx, op) {
+		return
+	}
+	suffix, err := randomSuffix()
+	if err != nil {
+		d.send(downloadResult{Op: op, Err: err})
+		return
+	}
+	tempPath := filepath.Join(filepath.Dir(op.AbsPath), "."+filepath.Base(op.AbsPath)+".afssync.tmp."+suffix)
+	if err := os.Symlink(op.Symlink, tempPath); err != nil {
+		d.send(downloadResult{Op: op, Err: err})
+		return
+	}
+	defer os.Remove(tempPath)
+	info, statErr := os.Lstat(op.AbsPath)
+	if d.cancelled(ctx, op) {
+		return
+	}
 	var conflictPath string
+	if !local.unchanged(op.AbsPath) {
+		d.send(downloadResult{Op: op, Skipped: true})
+		return
+	}
 	if op.Conflict {
 		conflictPath, err = moveLocalToConflict(d.conflict, op.AbsPath)
 		if err != nil {
 			d.send(downloadResult{Op: op, Err: err})
 			return
 		}
+	} else if statErr == nil && info.IsDir() {
+		// Preserve the existing behavior for replacing an empty directory.
+		if err := os.Remove(op.AbsPath); err != nil {
+			d.send(downloadResult{Op: op, Err: err})
+			return
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(op.AbsPath), 0o755); err != nil {
-		d.send(downloadResult{Op: op, Err: err})
-		return
-	}
-	if _, err := os.Lstat(op.AbsPath); err == nil {
-		_ = os.Remove(op.AbsPath)
-	}
-	if err := os.Symlink(op.Symlink, op.AbsPath); err != nil {
+	if err := os.Rename(tempPath, op.AbsPath); err != nil {
 		d.send(downloadResult{Op: op, Err: err})
 		return
 	}
 	d.echo.markSymlink(op.Path, op.Symlink)
-	info, err := os.Lstat(op.AbsPath)
+	info, err = os.Lstat(op.AbsPath)
 	if err != nil {
 		d.send(downloadResult{Op: op, Err: err})
 		return
@@ -450,6 +494,9 @@ func (d *downloader) processSymlink(ctx context.Context, op downloadOp) {
 }
 
 func (d *downloader) processMkdir(ctx context.Context, op downloadOp) {
+	if d.cancelled(ctx, op) {
+		return
+	}
 	if err := os.MkdirAll(op.AbsPath, 0o755); err != nil {
 		d.send(downloadResult{Op: op, Err: fmt.Errorf("mkdir local %s: %w", op.Path, err)})
 		return
@@ -459,24 +506,33 @@ func (d *downloader) processMkdir(ctx context.Context, op downloadOp) {
 }
 
 func (d *downloader) processDelete(ctx context.Context, op downloadOp) {
-	d.removeLocalFile(op)
-	d.send(downloadResult{Op: op})
+	d.send(downloadResult{Op: op, Err: d.removeLocalFile(ctx, op)})
 }
 
-func (d *downloader) removeLocalFile(op downloadOp) {
+func (d *downloader) removeLocalFile(ctx context.Context, op downloadOp) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := os.Lstat(op.AbsPath)
 	if err != nil {
-		return
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	d.echo.markDelete(op.Path)
 	if info.IsDir() {
 		_ = os.RemoveAll(op.AbsPath)
-		return
+		return nil
 	}
 	_ = os.Remove(op.AbsPath)
+	return nil
 }
 
 func (d *downloader) processChmod(ctx context.Context, op downloadOp) {
+	if d.cancelled(ctx, op) {
+		return
+	}
 	if err := os.Chmod(op.AbsPath, fs.FileMode(op.Mode&0o7777)); err != nil {
 		d.send(downloadResult{Op: op, Err: err})
 		return
@@ -484,19 +540,76 @@ func (d *downloader) processChmod(ctx context.Context, op downloadOp) {
 	d.send(downloadResult{Op: op, Mode: op.Mode})
 }
 
-// atomicWriteFile writes content into a sibling temp file and renames it
-// over the destination so concurrent readers (like our own watcher) see
-// either the old or the new file but never a partial. The temp filename
-// embeds .afssync.tmp so the baseline ignore filter drops the watcher event.
-func (d *downloader) atomicWriteFile(absPath string, data []byte, mode uint32) error {
-	return writeAtomicFile(absPath, data, mode)
+func (d *downloader) cancelled(ctx context.Context, op downloadOp) bool {
+	if err := ctx.Err(); err != nil {
+		d.send(downloadResult{Op: op, Err: err})
+		return true
+	}
+	return false
+}
+
+var errSyncDownloadLocalChanged = errors.New("local destination changed while staging download")
+
+// Stage bytes before replacing the destination. Cancelled downloads discard
+// their temporary files without moving the local file to a conflict copy.
+func (d *downloader) writeLocalFile(ctx context.Context, op downloadOp, mode uint32, write func(*os.File) error) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(op.AbsPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(op.AbsPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	local := downloadLocalSnapshot{info: info}
+	file, err := os.CreateTemp(filepath.Dir(op.AbsPath), "."+filepath.Base(op.AbsPath)+".afssync.tmp.*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if err := write(file); err != nil {
+		return "", err
+	}
+	if err := file.Chmod(fs.FileMode(mode & 0o7777)); err != nil {
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !local.unchanged(op.AbsPath) {
+		return "", errSyncDownloadLocalChanged
+	}
+	var conflictPath string
+	if op.Conflict {
+		conflictPath, err = moveLocalToConflict(d.conflict, op.AbsPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	return conflictPath, os.Rename(file.Name(), op.AbsPath)
 }
 
 func (d *downloader) send(r downloadResult) {
 	if d.results == nil {
 		return
 	}
-	d.results <- r
+	select {
+	case d.results <- r:
+	case <-d.stopCh:
+		// The next generation inspects the actual local tree.
+	}
 }
 
 func randomSuffix() (string, error) {

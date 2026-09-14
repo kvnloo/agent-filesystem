@@ -1029,6 +1029,7 @@ func TestSyncHistoryRenamePreservesLineage(t *testing.T) {
 			oldHistory.Lineages[0].Versions[1].Path == "/renamed.txt"
 	})
 
+	// File bytes become visible before the uploader appends their history row.
 	var newHistory controlplane.FileHistoryResponse
 	assertEventually(t, 3*time.Second, "renamed.txt content update history", func() bool {
 		var getErr error

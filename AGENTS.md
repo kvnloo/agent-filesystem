@@ -182,6 +182,22 @@ The most important implementation seams are:
 
 ## Lessons Learned
 
+- After save stops a sync generation, a failed save must request recovery on
+  the replacement watcher. Cancelled debounce timers and queued work will not
+  produce another event by themselves. Keep tracked upload queue sends
+  cancellation-aware so save can join the old generation.
+- Explicit save mutations must use the uploader's session History/version
+  recorder and the bytes actually sent to Redis. Record each completed mutation
+  before continuing; retries should compare observed remote state to avoid
+  duplicate rows. Preserve ownership of partially created directories/symlinks
+  when their final chmod fails.
+- Sync save completion must join every previous worker generation and delayed
+  sender before scanning or acknowledging a tree. Queue emptiness alone does
+  not establish completion. Verify remote bytes and keep the stored hash format
+  compatible with the chunk metadata used by subsequent background edits.
+  Cancel inbound replacements before they change the local tree, and compare
+  the local tree before and after draining active work.
+
 - Chunk metadata lookup can return `redis.Nil` for a missing remote file.
   Chunked sync uploads must recreate all local chunks when the remote file is
   absent, including chunks unchanged since the previous sync.

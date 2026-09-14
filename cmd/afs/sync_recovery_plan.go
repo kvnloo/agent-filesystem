@@ -28,7 +28,7 @@ func (r *reconciler) enqueueTrackedUpload(op uploadOp) {
 	}
 	r.state.mu.Unlock()
 	op.Tracked = true
-	r.uploadCh <- op
+	r.queueUpload(op)
 }
 
 func (r *reconciler) deferScanForPendingUpload(path string) bool {
