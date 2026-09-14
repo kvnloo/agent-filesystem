@@ -38,6 +38,34 @@ debugging configuration.
 Use sync mode when humans, editors, language servers, tests, or shell tools need
 a normal directory on disk.
 
+Sync mode uploads local changes asynchronously. If the watcher output queue
+fills or the operating system reports an event overflow, AFS requests recovery
+through a separate notification channel. Recovery refreshes directory watches
+and reconciles the existing local tree with Redis. Repeated overflow requests
+coalesce, and a request received during a scan schedules another pass. Failed
+recovery attempts are logged and retried after a one second delay.
+
+While applying changes beneath read-only local directories, reconciliation
+temporarily grants owner access and restores their permissions after the
+changes finish. Permissions are also restored when a pass fails or is cancelled,
+so a later retry can resume an incomplete directory download.
+
+Set the event buffer with `afs config set sync.watcherQueueCapacity 8192`.
+The default is 1024 events per sync daemon. Values from 1 through 1048576 are
+accepted; 0 or `afs config unset sync.watcherQueueCapacity` restores the default.
+The setting takes effect when the sync daemon next starts. It does not change
+the operating system's watcher limits.
+
+A larger event buffer consumes more memory and can absorb longer bursts, but
+does not increase synchronization throughput. The recovery channel holds one
+pending scan signal regardless of event buffer capacity. Recovery scans the
+workspace and performs Redis operations, adding CPU, disk, and network work.
+Continued overflow can require further scans and delay synchronization.
+
+Recovery follows the existing reconciliation and conflict rules. A successful
+local write does not wait for remote upload, so changes can still be lost if the
+local environment disappears before synchronization completes.
+
 Use live mount mode when you specifically need a live filesystem view. On macOS
 AFS uses NFS; on Linux it uses FUSE. Sync mode is usually the friendlier
 default.

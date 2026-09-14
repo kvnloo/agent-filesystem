@@ -366,3 +366,27 @@ The most important implementation seams are:
   mint against the Agent Workspace manifest route and authorize sessions only
   for volumes attached to that manifest; do not route this command through the
   lower-level volume workspace token path.
+- Watcher overflow recovery must use a notification channel separate from the
+  saturated event queue. Consume the request before scanning so losses during
+  recovery schedule another pass. Refresh native directory watches and use a
+  warm scan; cold hydration can replace an unsynced tree containing only hidden
+  paths such as `.venv`.
+- After a reconciliation upload, record the remote modification time from
+  `Stat`. Substituting the local timestamp can create a false remote change
+  and turn a later local edit into a conflict during recovery.
+- Full reconciliation must keep local directories writable while applying
+  descendant changes, including existing read-only directories with no mkdir
+  action. Restore modes deepest-first after workers join, even on failure or
+  cancellation, and preserve application chmods or directory replacements.
+
+Overflow scans must defer files with queued uploads until their results update
+the baseline. An existing remote inode can still contain a partial chunked
+upload. Deferred scans in a running daemon must stay on the warm merge path
+and retain recovery retries. Keep the uploaded snapshot's local timestamp
+separate from its Redis timestamp, preserve hashes during metadata refresh,
+and verify content and mode before creating a conflict copy.
+
+When a rename stages an edited destination, capture the final provisional
+baseline version before enqueueing the rename. A missing remote path followed
+by a failed or obsolete content upload must recover the local destination;
+it must not treat that provisional baseline as proof of a remote deletion.
