@@ -31,8 +31,8 @@ func TestWorkspaceCommandsImportCloneForkListAndDelete(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -42,44 +42,44 @@ func TestWorkspaceCommandsImportCloneForkListAndDelete(t *testing.T) {
 	defer closeStore()
 
 	clonedDir := filepath.Join(t.TempDir(), "repo-clone")
-	if err := cmdVolume([]string{"vol", "clone", "repo", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", "repo", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone) returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(clonedDir, "main.go")); err != nil {
 		t.Fatalf("expected cloned directory to contain main.go: %v", err)
 	}
 
-	if err := cmdVolume([]string{"vol", "fork", "repo", "repo-copy"}); err != nil {
-		t.Fatalf("cmdVolume(fork) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "fork", "repo", "repo-copy"}); err != nil {
+		t.Fatalf("cmdWorkspace(fork) returned error: %v", err)
 	}
 
 	listOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list"})
+		return cmdWorkspace([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
-	if !strings.Contains(listOutput, "volumes on redis://") {
-		t.Fatalf("cmdVolume(list) output = %q, want database-scoped title", listOutput)
+	if !strings.Contains(listOutput, "workspaces on redis://") {
+		t.Fatalf("cmdWorkspace(list) output = %q, want database-scoped title", listOutput)
 	}
 	if !strings.Contains(listOutput, "repo") || !strings.Contains(listOutput, "repo-copy") {
-		t.Fatalf("cmdVolume(list) output = %q, want both workspace names", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want both workspace names", listOutput)
 	}
 	if !strings.Contains(listOutput, "✓") {
-		t.Fatalf("cmdVolume(list) output = %q, want selected workspace checkmark", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want selected workspace checkmark", listOutput)
 	}
 	if strings.Contains(listOutput, "<active>") {
-		t.Fatalf("cmdVolume(list) output = %q, did not expect trailing active marker", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, did not expect trailing active marker", listOutput)
 	}
 	if strings.Contains(listOutput, "checkpoint") {
-		t.Fatalf("cmdVolume(list) output = %q, did not expect checkpoint-count column", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, did not expect checkpoint-count column", listOutput)
 	}
 
 	listJSONOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list", "--json"})
+		return cmdWorkspace([]string{"ws", "list", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list --json) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list --json) returned error: %v", err)
 	}
 	var listJSON struct {
 		Items []struct {
@@ -99,15 +99,15 @@ func TestWorkspaceCommandsImportCloneForkListAndDelete(t *testing.T) {
 	}
 
 	stripped := stripAnsi(listOutput)
-	if !strings.Contains(stripped, "Volume") || !strings.Contains(stripped, "Mounted") || !strings.Contains(stripped, "Database") || !strings.Contains(stripped, "Updated") {
-		t.Fatalf("cmdVolume(list) output = %q, want table headers", listOutput)
+	if !strings.Contains(stripped, "Workspace") || !strings.Contains(stripped, "Mounted") || !strings.Contains(stripped, "Database") || !strings.Contains(stripped, "Updated") {
+		t.Fatalf("cmdWorkspace(list) output = %q, want table headers", listOutput)
 	}
 	var repoLine, copyLine string
 	var headerLine string
 	for _, line := range strings.Split(listOutput, "\n") {
 		strippedLine := stripAnsi(line)
 		switch {
-		case strings.Contains(strippedLine, "Volume") && strings.Contains(strippedLine, "Database"):
+		case strings.Contains(strippedLine, "Workspace") && strings.Contains(strippedLine, "Database"):
 			headerLine = strippedLine
 		case strings.Contains(strippedLine, "repo-copy"):
 			copyLine = strippedLine
@@ -116,7 +116,7 @@ func TestWorkspaceCommandsImportCloneForkListAndDelete(t *testing.T) {
 		}
 	}
 	if headerLine == "" || repoLine == "" || copyLine == "" {
-		t.Fatalf("cmdVolume(list) output = %q, want header and both workspace rows", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want header and both workspace rows", listOutput)
 	}
 	mountedIdx := strings.Index(headerLine, "Mounted")
 	updatedIdx := strings.Index(headerLine, "Updated")
@@ -144,8 +144,8 @@ func TestWorkspaceCommandsImportCloneForkListAndDelete(t *testing.T) {
 		t.Fatalf("copy database column empty\nheader: %q\nrow: %q", headerLine, copyLine)
 	}
 
-	if err := cmdVolume([]string{"vol", "delete", "--no-confirmation", "repo-copy"}); err != nil {
-		t.Fatalf("cmdVolume(delete) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "delete", "--no-confirmation", "repo-copy"}); err != nil {
+		t.Fatalf("cmdWorkspace(delete) returned error: %v", err)
 	}
 
 	exists, err := store.workspaceExists(context.Background(), "repo-copy")
@@ -182,8 +182,8 @@ func TestWorkspaceDeletePromptsWhenWorkspaceOmitted(t *testing.T) {
 	cfg.WorkRoot = t.TempDir()
 	saveTempConfig(t, cfg)
 
-	if err := cmdVolume([]string{"vol", "create", "repo-delete"}); err != nil {
-		t.Fatalf("cmdVolume(create) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "repo-delete"}); err != nil {
+		t.Fatalf("cmdWorkspace(create) returned error: %v", err)
 	}
 
 	input, err := os.CreateTemp(t.TempDir(), "stdin")
@@ -204,16 +204,16 @@ func TestWorkspaceDeletePromptsWhenWorkspaceOmitted(t *testing.T) {
 	})
 
 	out, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "delete"})
+		return cmdWorkspace([]string{"ws", "delete"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(delete) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(delete) returned error: %v", err)
 	}
-	if !strings.Contains(out, "Select volume") {
-		t.Fatalf("cmdVolume(delete) output = %q, want workspace selection prompt", out)
+	if !strings.Contains(out, "Select workspace") {
+		t.Fatalf("cmdWorkspace(delete) output = %q, want workspace selection prompt", out)
 	}
 	if !strings.Contains(out, "Are you sure you want to delete repo-delete? [y/N]") {
-		t.Fatalf("cmdVolume(delete) output = %q, want delete confirmation", out)
+		t.Fatalf("cmdWorkspace(delete) output = %q, want delete confirmation", out)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -311,22 +311,22 @@ func TestWorkspaceListSelfHostedAggregatesAcrossDatabasesWithoutConfiguredDataba
 	saveTempConfig(t, cfg)
 
 	listOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list"})
+		return cmdWorkspace([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
-	if !strings.Contains(listOutput, "volumes on "+server.URL+" (auto database)") {
-		t.Fatalf("cmdVolume(list) output = %q, want workspace-first managed title", listOutput)
+	if !strings.Contains(listOutput, "workspaces on "+server.URL+" (auto database)") {
+		t.Fatalf("cmdWorkspace(list) output = %q, want workspace-first managed title", listOutput)
 	}
 	if !strings.Contains(listOutput, "repo") || !strings.Contains(listOutput, secondaryWorkspace) {
-		t.Fatalf("cmdVolume(list) output = %q, want workspaces from both databases", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want workspaces from both databases", listOutput)
 	}
 	if !strings.Contains(listOutput, "✓") {
-		t.Fatalf("cmdVolume(list) output = %q, want selected workspace marker for %q", listOutput, secondaryWorkspace)
+		t.Fatalf("cmdWorkspace(list) output = %q, want selected workspace marker for %q", listOutput, secondaryWorkspace)
 	}
-	if !strings.Contains(stripAnsi(listOutput), "Volume") || !strings.Contains(stripAnsi(listOutput), "ID") {
-		t.Fatalf("cmdVolume(list) output = %q, want workspace list headers", listOutput)
+	if !strings.Contains(stripAnsi(listOutput), "Workspace") || !strings.Contains(stripAnsi(listOutput), "ID") {
+		t.Fatalf("cmdWorkspace(list) output = %q, want workspace list headers", listOutput)
 	}
 }
 
@@ -341,8 +341,8 @@ func TestWorkspaceListShowsMountedFolder(t *testing.T) {
 	cfg.WorkRoot = filepath.Join(homeDir, ".afs", "workspaces")
 	saveTempConfig(t, cfg)
 
-	if err := cmdVolume([]string{"vol", "create", "repo"}); err != nil {
-		t.Fatalf("cmdVolume(create) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "repo"}); err != nil {
+		t.Fatalf("cmdWorkspace(create) returned error: %v", err)
 	}
 	localPath := filepath.Join(homeDir, "projects", "customer-success", "very-deeply-nested", "repo-with-a-long-mount-folder-name")
 	displayPath := filepath.Join("~", "projects", "customer-success", "very-deeply-nested", "repo-with-a-long-mount-folder-name")
@@ -359,21 +359,21 @@ func TestWorkspaceListShowsMountedFolder(t *testing.T) {
 	}
 
 	out, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list"})
+		return cmdWorkspace([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
 	stripped := stripAnsi(out)
 	for _, want := range []string{"Mounted", "repo", displayPath} {
 		if !strings.Contains(stripped, want) {
-			t.Fatalf("cmdVolume(list) output = %q, want %q", out, want)
+			t.Fatalf("cmdWorkspace(list) output = %q, want %q", out, want)
 		}
 	}
 	var headerLine, repoLine string
 	for _, line := range strings.Split(stripped, "\n") {
 		switch {
-		case strings.Contains(line, "Volume") && strings.Contains(line, "Mounted") && strings.Contains(line, "Updated"):
+		case strings.Contains(line, "Workspace") && strings.Contains(line, "Mounted") && strings.Contains(line, "Updated"):
 			headerLine = line
 		case strings.Contains(line, displayPath):
 			repoLine = line
@@ -383,15 +383,15 @@ func TestWorkspaceListShowsMountedFolder(t *testing.T) {
 	updatedIdx := strings.Index(headerLine, "Updated")
 	databaseIdx := strings.Index(headerLine, "Database")
 	if headerLine == "" || repoLine == "" || mountedIdx == -1 || updatedIdx == -1 || databaseIdx == -1 || mountedIdx >= updatedIdx {
-		t.Fatalf("cmdVolume(list) output = %q, want mounted and updated columns", out)
+		t.Fatalf("cmdWorkspace(list) output = %q, want mounted and updated columns", out)
 	}
 	mountedColumn := strings.TrimSpace(repoLine[mountedIdx:updatedIdx])
 	if strings.Contains(mountedColumn, "…") {
-		t.Fatalf("cmdVolume(list) mounted path was ellipsized: %q", mountedColumn)
+		t.Fatalf("cmdWorkspace(list) mounted path was ellipsized: %q", mountedColumn)
 	}
 	databaseColumn := strings.TrimSpace(repoLine[databaseIdx:])
 	if databaseColumn == "" || strings.Contains(databaseColumn, "…") {
-		t.Fatalf("cmdVolume(list) database column = %q, want unellipsized database label", databaseColumn)
+		t.Fatalf("cmdWorkspace(list) database column = %q, want unellipsized database label", databaseColumn)
 	}
 }
 
@@ -408,13 +408,13 @@ func TestWorkspaceListSelfHostedIgnoresStaleConfiguredDatabaseForWorkspaceFirstR
 	saveTempConfig(t, cfg)
 
 	listOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list"})
+		return cmdWorkspace([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
 	if !strings.Contains(listOutput, "repo") || !strings.Contains(listOutput, secondaryWorkspace) {
-		t.Fatalf("cmdVolume(list) output = %q, want workspaces from both databases despite stale config database", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want workspaces from both databases despite stale config database", listOutput)
 	}
 }
 
@@ -446,16 +446,16 @@ func TestWorkspaceListSelfHostedShowsDatabaseAndIDForDuplicateNames(t *testing.T
 	}
 
 	listOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "list"})
+		return cmdWorkspace([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
 	if !strings.Contains(listOutput, "primary") || !strings.Contains(listOutput, "secondary") {
-		t.Fatalf("cmdVolume(list) output = %q, want database names for duplicate workspaces", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want database names for duplicate workspaces", listOutput)
 	}
 	if !strings.Contains(listOutput, "ws_") {
-		t.Fatalf("cmdVolume(list) output = %q, want workspace ids for duplicate workspaces", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want workspace ids for duplicate workspaces", listOutput)
 	}
 	stripped := stripAnsi(listOutput)
 	var primaryLine, secondaryLine string
@@ -468,7 +468,7 @@ func TestWorkspaceListSelfHostedShowsDatabaseAndIDForDuplicateNames(t *testing.T
 		}
 	}
 	if primaryLine == "" || secondaryLine == "" {
-		t.Fatalf("cmdVolume(list) output = %q, want primary and secondary duplicate rows", listOutput)
+		t.Fatalf("cmdWorkspace(list) output = %q, want primary and secondary duplicate rows", listOutput)
 	}
 	if strings.Contains(primaryLine, displayPath) {
 		t.Fatalf("primary duplicate row incorrectly inherited mounted path: %q", primaryLine)
@@ -491,16 +491,16 @@ func TestWorkspaceCreateSuggestsMountFirst(t *testing.T) {
 	saveTempConfig(t, cfg)
 
 	output, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "create", "demo"})
+		return cmdWorkspace([]string{"ws", "create", "demo"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(create) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(create) returned error: %v", err)
 	}
-	if !strings.Contains(output, "afs.test vol mount demo <directory>") {
-		t.Fatalf("cmdVolume(create) output = %q, want mount-first next hint", output)
+	if !strings.Contains(output, "afs.test ws mount demo <directory>") {
+		t.Fatalf("cmdWorkspace(create) output = %q, want mount-first next hint", output)
 	}
 	if strings.Contains(output, "workspace run demo -- /bin/sh") {
-		t.Fatalf("cmdVolume(create) output = %q, did not expect workspace run hint", output)
+		t.Fatalf("cmdWorkspace(create) output = %q, did not expect workspace run hint", output)
 	}
 }
 
@@ -518,19 +518,19 @@ func TestWorkspaceCloneRejectsNonEmptyDestination(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	targetDir := t.TempDir()
 	writeTestFile(t, filepath.Join(targetDir, "existing.txt"), "keep me\n")
 
-	err := cmdVolume([]string{"vol", "clone", "repo", targetDir})
+	err := cmdWorkspace([]string{"ws", "clone", "repo", targetDir})
 	if err == nil {
-		t.Fatal("cmdVolume(clone) returned nil error, want destination rejection")
+		t.Fatal("cmdWorkspace(clone) returned nil error, want destination rejection")
 	}
 	if !strings.Contains(err.Error(), "not an empty directory") {
-		t.Fatalf("cmdVolume(clone) error = %q, want non-empty directory rejection", err)
+		t.Fatalf("cmdWorkspace(clone) error = %q, want non-empty directory rejection", err)
 	}
 }
 
@@ -549,8 +549,8 @@ func TestCheckpointCommandsCreateAndRestore(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -722,8 +722,8 @@ func TestCheckpointCreateUsesLiveWorkspaceWhenNoLocalTreeExists(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	loadedCfg, store, closeStore, err := openAFSStore(context.Background())
@@ -789,8 +789,8 @@ func TestCheckpointCreatePrefersMountedLiveWorkspaceOverLocalTree(t *testing.T) 
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -878,8 +878,8 @@ func TestCheckpointCommandsPromptForWorkspaceWhenOmitted(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -965,8 +965,8 @@ func TestCheckpointCreateSavesEvenWhenUnchanged(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -1013,8 +1013,8 @@ func TestCheckpointRestoreIgnoresManagedSyncDaemonHandles(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	localRoot := filepath.Join(t.TempDir(), "repo")
@@ -1093,8 +1093,8 @@ func TestCheckpointRestoreRejectsActiveSyncClientWithOpenHandles(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	localRoot := t.TempDir()
@@ -1155,8 +1155,8 @@ func TestCheckpointCreateUsesActiveMountedWorkspaceWhenConfigUnset(t *testing.T)
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	_, store, closeStore, err := openAFSStore(context.Background())
@@ -1273,20 +1273,20 @@ func TestWorkspaceCloneAndForkUseCurrentWorkspaceWhenOmitted(t *testing.T) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 
 	clonedDir := filepath.Join(t.TempDir(), "repo-clone")
-	if err := cmdVolume([]string{"vol", "clone", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone omitted workspace) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone omitted workspace) returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(clonedDir, "main.go")); err != nil {
 		t.Fatalf("expected cloned directory to contain main.go: %v", err)
 	}
 
-	if err := cmdVolume([]string{"vol", "fork", "repo-copy"}); err != nil {
-		t.Fatalf("cmdVolume(fork omitted source) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "fork", "repo-copy"}); err != nil {
+		t.Fatalf("cmdWorkspace(fork omitted source) returned error: %v", err)
 	}
 
 	loadedCfg, store, closeStore, err := openAFSStore(context.Background())
@@ -1323,12 +1323,12 @@ func TestWorkspaceRunCommandIsRemoved(t *testing.T) {
 func TestWorkspaceImportRejectsRemovedCloneAtSourceFlag(t *testing.T) {
 	t.Helper()
 
-	err := cmdVolume([]string{"vol", "import", "--clone-at-source", "repo", "/tmp/repo"})
+	err := cmdWorkspace([]string{"ws", "import", "--clone-at-source", "repo", "/tmp/repo"})
 	if err == nil {
-		t.Fatal("cmdVolume(import) returned nil error, want removed flag rejection")
+		t.Fatal("cmdWorkspace(import) returned nil error, want removed flag rejection")
 	}
 	if !strings.Contains(err.Error(), `unknown flag "--clone-at-source"`) {
-		t.Fatalf("cmdVolume(import) error = %q, want unknown flag", err)
+		t.Fatalf("cmdWorkspace(import) error = %q, want unknown flag", err)
 	}
 }
 

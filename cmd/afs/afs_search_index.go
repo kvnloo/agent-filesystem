@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/agent-filesystem/internal/controlplane"
 	"github.com/redis/agent-filesystem/internal/rediscontent"
 	"github.com/redis/agent-filesystem/internal/searchindex"
 	"github.com/redis/go-redis/v9"
@@ -17,6 +18,16 @@ const searchIndexReadyTimeout = 5 * time.Second
 const searchIndexReadyPollInterval = 25 * time.Millisecond
 
 func ensureWorkspaceSearchIndex(ctx context.Context, rdb *redis.Client, fsKey string) (bool, error) {
+	// Current filesystem clients publish content without updating the legacy
+	// grep fields. A ready marker cannot prove this projection is current, and
+	// backfilling inode hashes could recreate entries during a root replacement.
+	// Exact grep therefore scans the published tree when generation fencing is
+	// enabled, until this projection has a guarded revision protocol of its own.
+	if exists, err := rdb.Exists(ctx, controlplane.WorkspaceGenerationKey(fsKey)).Result(); err != nil {
+		return false, err
+	} else if exists != 0 {
+		return false, nil
+	}
 	indexName := searchindex.IndexName(fsKey)
 	if _, err := rdb.FTInfo(ctx, indexName).Result(); err != nil {
 		switch {

@@ -636,94 +636,10 @@ export type AFSWorkspaceListResponse = {
 
 export type AFSWorkspaceDetail = AFSWorkspace;
 
-export type AFSWorkspaceCompositionMount = {
-  volumeId: string;
-  volumeName?: string;
-  mountPath: string;
-  readonly: boolean;
-  volumeTokenId?: string;
-};
-
-export type AFSWorkspaceCompositionVolumeLabel = {
-  id: string;
-  name?: string;
-  mountPath: string;
-  readonly: boolean;
-};
-
-export type AFSWorkspaceBookmarkVolume = {
-  volumeId: string;
-  volumeName?: string;
-  checkpointId: string;
-};
-
-export type AFSWorkspaceBookmark = {
-  workspaceId: string;
-  name: string;
-  description?: string;
-  volumes: AFSWorkspaceBookmarkVolume[];
-  createdAt: string;
-};
-
-export type AFSWorkspaceCompositionSummary = {
-  id: string;
-  name: string;
-  description?: string;
+export type ForkWorkspaceInput = {
   databaseId?: string;
-  databaseName?: string;
-  cloudAccount?: string;
-  ownerSubject?: string;
-  ownerLabel?: string;
-  mountCount: number;
-  mountedVolumes: AFSWorkspaceCompositionVolumeLabel[];
-  connectedAgentCount: number;
-  lastActivityAt?: string;
-  updatedAt: string;
-};
-
-export type AFSWorkspaceCompositionDetail = {
-  id: string;
+  workspaceId: string;
   name: string;
-  description?: string;
-  databaseId?: string;
-  databaseName?: string;
-  cloudAccount?: string;
-  ownerSubject?: string;
-  ownerLabel?: string;
-  mounts: AFSWorkspaceCompositionMount[];
-  bookmarks: AFSWorkspaceBookmark[];
-  connectedAgentCount: number;
-  createdAt: string;
-  updatedAt: string;
-  lastActivityAt?: string;
-};
-
-export type CreateWorkspaceCompositionInput = {
-  name: string;
-  description?: string;
-  databaseId?: string;
-  mounts?: AFSWorkspaceCompositionMount[];
-};
-
-export type UpdateWorkspaceCompositionInput = {
-  workspaceId: string;
-  name?: string;
-  description?: string;
-};
-
-export type ReplaceWorkspaceCompositionMountsInput = {
-  workspaceId: string;
-  mounts: AFSWorkspaceCompositionMount[];
-};
-
-export type AddWorkspaceCompositionMountInput = {
-  workspaceId: string;
-  mount: AFSWorkspaceCompositionMount;
-};
-
-export type RemoveWorkspaceCompositionMountInput = {
-  workspaceId: string;
-  volumeId: string;
 };
 
 export type AFSRedisStats = {
@@ -970,8 +886,7 @@ export type AFSMCPCapability = "ro" | "rw" | "rw-checkpoint" | "admin";
 /**
  * Scope of an access token. `control-plane` = user-scoped, no workspace
  * binding; agents use it for management + on-demand issuance of scoped
- * tokens. `volume:<volumeId>` = bound to a content tree; legacy
- * `workspace:<workspaceId>` scopes may still be shown for old tokens.
+ * tokens. `workspace:<workspaceId>` = bound to one file tree.
  */
 export type AFSMCPScope = string;
 
@@ -983,11 +898,6 @@ export function isControlPlaneScope(scope?: string): boolean {
   );
 }
 
-export type AFSMCPTokenMountCapability = {
-  volumeId: string;
-  capability: AFSMCPCapability | string;
-};
-
 export type AFSMCPToken = {
   id: string;
   name?: string;
@@ -998,7 +908,6 @@ export type AFSMCPToken = {
   profile: AFSMCPProfile;
   capability?: AFSMCPCapability | string;
   readonly: boolean;
-  mountCapabilities?: AFSMCPTokenMountCapability[];
   token?: string;
   createdAt: string;
   lastUsedAt?: string;
@@ -1021,23 +930,6 @@ export type CreateMCPTokenInput = {
 export type CreateControlPlaneTokenInput = {
   name?: string;
   expiresAt?: string;
-};
-
-/**
- * Input for minting a workspace-scoped API key bound to an Agent Workspace
- * composition. The resulting token works for both the MCP server and the CLI
- * HTTP API. `mountCapabilities` overrides the default `capability` per mount —
- * the backend rejects entries that reference volumes outside the workspace
- * manifest, and refuses to upgrade a manifest-readonly mount to read+write.
- */
-export type CreateWorkspaceAPIKeyInput = {
-  workspaceId: string;
-  name?: string;
-  capability?: AFSMCPCapability | string;
-  profile?: AFSMCPProfile;
-  mountCapabilities?: AFSMCPTokenMountCapability[];
-  expiresAt?: string;
-  templateSlug?: string;
 };
 
 export type AFSCLIAccessTokenCapability = "mount-ro" | "mount-rw";

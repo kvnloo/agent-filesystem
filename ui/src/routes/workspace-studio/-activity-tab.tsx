@@ -38,7 +38,7 @@ export function ActivityTab({ databaseId, workspaceId, updatedAt, onTabChange }:
     <SectionGrid>
       <SectionCard $span={12}>
         <SectionHeader>
-          <SectionTitle title="Volume history" />
+          <SectionTitle title="Workspace history" />
           <LastUpdated>Last updated {new Date(updatedAt).toLocaleString()}</LastUpdated>
         </SectionHeader>
         <ActivityTable

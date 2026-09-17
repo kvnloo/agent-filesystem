@@ -112,14 +112,14 @@ func (s *syncSaveService) save(request syncControlRequest) syncControlResult {
 		return fail(errors.New("unsupported sync save version"))
 	}
 	if request.Volume != s.workspace || filepath.Clean(request.LocalRoot) != s.localRoot {
-		return fail(errors.New("save request does not match the mounted volume and local root"))
+		return fail(errors.New("save request does not match the mounted workspace and local root"))
 	}
 	daemon := s.active
 	if daemon == nil {
 		return fail(errors.New("sync daemon is unavailable"))
 	}
 	if request.Path != "" || request.Content != "" || request.VersionID != "" || request.FileID != "" || request.Ordinal != 0 {
-		return fail(errors.New("save operates on the entire mounted sync volume"))
+		return fail(errors.New("save operates on the entire mounted sync workspace"))
 	}
 	if daemon.cfg.Readonly {
 		return fail(errors.New("cannot save a read-only sync mount"))

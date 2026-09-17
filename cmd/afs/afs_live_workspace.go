@@ -63,6 +63,11 @@ func materializeAFSWorkspaceFromLiveRoot(ctx context.Context, cfg config, store 
 }
 
 func persistAFSMaterializedState(ctx context.Context, cfg config, store *afsStore, meta workspaceMeta, dirty bool) (afsLocalState, error) {
+	if rootDirty, known, err := store.workspaceRootDirtyState(ctx, meta.Name); err != nil {
+		return afsLocalState{}, err
+	} else if known {
+		dirty = rootDirty
+	}
 	now := time.Now().UTC()
 	localState := afsLocalState{
 		Version:        afsFormatVersion,
@@ -84,22 +89,8 @@ func persistAFSMaterializedState(ctx context.Context, cfg config, store *afsStor
 		return afsLocalState{}, err
 	}
 
-	host, _ := os.Hostname()
-	meta.LastMaterializedAt = now
-	meta.LastKnownMaterializedAt = host
-	meta.DirtyHint = dirty
-	if dirty {
-		if err := store.markWorkspaceRootDirty(ctx, meta.Name); err != nil {
-			return afsLocalState{}, err
-		}
-	} else {
-		if err := store.markWorkspaceRootClean(ctx, meta.Name, meta.HeadSavepoint); err != nil {
-			return afsLocalState{}, err
-		}
-	}
-	if err := store.putWorkspaceMeta(ctx, meta); err != nil {
-		return afsLocalState{}, err
-	}
+	// Materializing a snapshot only changes local state. Publishing this stale
+	// metadata or clearing the root marker could overwrite a peer checkpoint.
 	return localState, nil
 }
 

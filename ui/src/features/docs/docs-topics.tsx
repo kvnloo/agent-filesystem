@@ -1197,7 +1197,7 @@ const faqTopic: DocsTopic = {
               Does AFS handle large files like datasets, models, and media?
             </FAQQuestion>
             <DocProse>
-              Yes, within the shape of an agent workspace. AFS stores file
+              Yes, within the shape of an workspace. AFS stores file
               content in Redis-backed external content keys, supports byte-range
               reads and writes in the mount path, and syncs changed large files
               in chunks. The default sync per-file cap is 2 GB, so keep

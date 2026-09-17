@@ -7,15 +7,16 @@ import (
 
 // StatResult holds a parsed stat response.
 type StatResult struct {
-	Inode uint64
-	Type  string // "file", "dir", "symlink"
-	Mode  uint32 // POSIX permission bits
-	UID   uint32
-	GID   uint32
-	Size  int64
-	Ctime int64 // milliseconds since epoch
-	Mtime int64
-	Atime int64
+	Revision string
+	Inode    uint64
+	Type     string // "file", "dir", "symlink"
+	Mode     uint32 // POSIX permission bits
+	UID      uint32
+	GID      uint32
+	Size     int64
+	Ctime    int64 // milliseconds since epoch
+	Mtime    int64
+	Atime    int64
 }
 
 // LsEntry holds one entry from a long directory listing.

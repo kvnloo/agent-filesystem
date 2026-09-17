@@ -47,7 +47,9 @@ class BashResult:
 
 def as_workspace_name(workspace: str | Mapping[str, Any] | None) -> str:
     if isinstance(workspace, str):
-        return workspace
+        if not workspace.strip():
+            raise AFSError("workspace name is required")
+        return workspace.strip()
     if workspace is None:
         raise AFSError("workspace name is required")
     name = str(workspace.get("name", "")).strip()

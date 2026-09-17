@@ -78,6 +78,13 @@ func MarkWorkspaceRootClean(ctx context.Context, store *Store, workspace, headSa
 	if err != nil {
 		return err
 	}
+	if _, ok := ctx.Value(rootReplacementKey{}).(rootReplacement); ok {
+		return mutateRootReplacement(ctx, store.rdb, storageID, func(pipe redis.Pipeliner) error {
+			pipe.Set(ctx, workspaceRootHeadKey(storageID), headSavepoint, 0)
+			pipe.Set(ctx, workspaceRootDirtyKey(storageID), "0", 0)
+			return nil
+		})
+	}
 	pipe := store.rdb.TxPipeline()
 	pipe.Set(ctx, workspaceRootHeadKey(storageID), headSavepoint, 0)
 	pipe.Set(ctx, workspaceRootDirtyKey(storageID), "0", 0)
@@ -99,14 +106,7 @@ func EnsureWorkspaceRoot(ctx context.Context, store *Store, workspace string) (s
 		return WorkspaceFSKey(storageID), meta.HeadSavepoint, false, nil
 	}
 
-	headManifest, err := store.GetManifest(ctx, storageID, meta.HeadSavepoint)
-	if err != nil {
-		return "", "", false, err
-	}
-	if err := SyncWorkspaceRoot(ctx, store, storageID, headManifest); err != nil {
-		return "", "", false, err
-	}
-	return WorkspaceFSKey(storageID), meta.HeadSavepoint, true, nil
+	return "", "", false, fmt.Errorf("workspace live root is missing; restore a checkpoint explicitly: %w", os.ErrNotExist)
 }
 
 func SyncWorkspaceRoot(ctx context.Context, store *Store, workspace string, m Manifest) error {
@@ -116,6 +116,8 @@ func SyncWorkspaceRoot(ctx context.Context, store *Store, workspace string, m Ma
 // SyncOptions tunes SyncWorkspaceRootWithOptions for callers that can avoid
 // round trips the default path must make.
 type SyncOptions struct {
+	// ImportLockToken identifies an import lock already held by this caller.
+	ImportLockToken string
 	// BlobProvider, when set, short-circuits GetBlob for materialized file
 	// nodes. It returns (data, true) if the caller has the blob in memory;
 	// otherwise (nil, false) and the sync falls back to Redis.
@@ -134,6 +136,11 @@ func SyncWorkspaceRootWithOptions(ctx context.Context, store *Store, workspace s
 	if err != nil {
 		return err
 	}
+	ctx, finish, err := beginRootReplacement(ctx, store, storageID, opts.ImportLockToken)
+	if err != nil {
+		return err
+	}
+	defer finish(false)
 	fsKey := WorkspaceFSKey(storageID)
 	if !opts.SkipNamespaceReset {
 		if err := resetWorkspaceFSNamespace(ctx, store.rdb, fsKey); err != nil {
@@ -142,24 +149,21 @@ func SyncWorkspaceRootWithOptions(ctx context.Context, store *Store, workspace s
 	} else {
 		// Even when skipping the namespace scan we still need to drop the
 		// cached head/dirty markers so workspaceRootExists re-verifies.
-		if err := store.rdb.Del(ctx,
-			"afs:{"+fsKey+"}:info",
-			"afs:{"+fsKey+"}:next_inode",
-			searchindex.ReadyKey(fsKey),
-			queryindex.DirtySetKey(fsKey),
-			queryindex.ReadyKey(fsKey),
-			workspaceRootHeadKey(fsKey),
-			workspaceRootDirtyKey(fsKey),
-		).Err(); err != nil {
+		if err := resetWorkspaceFSMarkers(ctx, store.rdb, fsKey); err != nil {
 			return err
 		}
 	}
 	if err := materializeManifestToWorkspaceFS(ctx, store, storageID, fsKey, m, opts); err != nil {
 		return err
 	}
+	// The search schema only registers the existing inode prefix. Query paths
+	// ensure their derived indexes lazily, without a replacement publishing an
+	// unguarded query-ready marker after losing its lease.
 	_, _ = searchindex.EnsureIndex(ctx, store.rdb, fsKey)
-	_, _ = queryindex.EnsureIndex(ctx, store.rdb, fsKey)
-	return MarkWorkspaceRootClean(ctx, store, storageID, m.Savepoint)
+	if err := MarkWorkspaceRootClean(ctx, store, storageID, m.Savepoint); err != nil {
+		return err
+	}
+	return finish(true)
 }
 
 func workspaceRootExists(ctx context.Context, rdb *redis.Client, workspace, headSavepoint string) (bool, error) {
@@ -175,14 +179,7 @@ func workspaceRootExists(ctx context.Context, rdb *redis.Client, workspace, head
 		return false, nil
 	}
 
-	rootHead, err := rdb.Get(ctx, workspaceRootHeadKey(workspace)).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return false, nil
-		}
-		return false, err
-	}
-	return rootHead == headSavepoint, nil
+	return count == 2, nil
 }
 
 func resetWorkspaceFSNamespace(ctx context.Context, rdb *redis.Client, fsKey string) error {
@@ -202,7 +199,10 @@ func resetWorkspaceFSNamespace(ctx context.Context, rdb *redis.Client, fsKey str
 				return err
 			}
 			if len(keys) > 0 {
-				if err := rdb.Del(ctx, keys...).Err(); err != nil {
+				if err := mutateRootReplacement(ctx, rdb, fsKey, func(pipe redis.Pipeliner) error {
+					pipe.Del(ctx, keys...)
+					return nil
+				}); err != nil {
 					return err
 				}
 			}
@@ -212,18 +212,22 @@ func resetWorkspaceFSNamespace(ctx context.Context, rdb *redis.Client, fsKey str
 			}
 		}
 	}
-	if err := rdb.Del(ctx,
-		"afs:{"+fsKey+"}:info",
-		"afs:{"+fsKey+"}:next_inode",
-		searchindex.ReadyKey(fsKey),
-		queryindex.DirtySetKey(fsKey),
-		queryindex.ReadyKey(fsKey),
-		workspaceRootHeadKey(fsKey),
-		workspaceRootDirtyKey(fsKey),
-	).Err(); err != nil {
-		return err
-	}
-	return nil
+	return resetWorkspaceFSMarkers(ctx, rdb, fsKey)
+}
+
+func resetWorkspaceFSMarkers(ctx context.Context, rdb *redis.Client, fsKey string) error {
+	return mutateRootReplacement(ctx, rdb, fsKey, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx,
+			"afs:{"+fsKey+"}:info",
+			"afs:{"+fsKey+"}:next_inode",
+			searchindex.ReadyKey(fsKey),
+			queryindex.DirtySetKey(fsKey),
+			queryindex.ReadyKey(fsKey),
+			workspaceRootHeadKey(fsKey),
+			workspaceRootDirtyKey(fsKey),
+		)
+		return nil
+	})
 }
 
 func materializeManifestToWorkspaceFS(ctx context.Context, store *Store, workspace, fsKey string, m Manifest, opts SyncOptions) error {
@@ -301,17 +305,22 @@ func writeWorkspaceFSNodes(ctx context.Context, store *Store, workspace, fsKey s
 		totalData    int64
 	)
 
-	pipe := store.rdb.Pipeline()
+	var writes []func(redis.Pipeliner)
 	queuedEntries := 0
 	queuedBytes := int64(0)
 	flush := func() error {
 		if queuedEntries == 0 {
 			return nil
 		}
-		if _, err := pipe.Exec(ctx); err != nil {
+		if err := mutateRootReplacement(ctx, store.rdb, fsKey, func(pipe redis.Pipeliner) error {
+			for _, write := range writes {
+				write(pipe)
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-		pipe = store.rdb.Pipeline()
+		writes = nil
 		queuedEntries = 0
 		queuedBytes = 0
 		return nil
@@ -347,27 +356,31 @@ func writeWorkspaceFSNodes(ctx context.Context, store *Store, workspace, fsKey s
 		if err := queueCapacity(workspaceFSNodeWeight(node, size)); err != nil {
 			return err
 		}
-		if node.Entry.Type == "file" {
-			rediscontent.QueueWriteFull(ctx, pipe, workspaceFSContentKey(fsKey, node.ID), contentRef, content)
-			queryindex.QueueMarkDirty(ctx, pipe, fsKey, node.ID)
-		}
-		pipe.HSet(ctx, workspaceFSInodeKey(fsKey, node.ID), fields)
-		if node.ParentID != "" {
-			pipe.HSet(ctx, workspaceFSDirentsKey(fsKey, node.ParentID), node.Name, node.ID)
-		}
+		writes = append(writes, func(pipe redis.Pipeliner) {
+			if node.Entry.Type == "file" {
+				rediscontent.QueueWriteFull(ctx, pipe, workspaceFSContentKey(fsKey, node.ID), contentRef, content)
+				queryindex.QueueMarkDirty(ctx, pipe, fsKey, node.ID)
+			}
+			pipe.HSet(ctx, workspaceFSInodeKey(fsKey, node.ID), fields)
+			if node.ParentID != "" {
+				pipe.HSet(ctx, workspaceFSDirentsKey(fsKey, node.ParentID), node.Name, node.ID)
+			}
+		})
 	}
 
 	if err := queueCapacity(512); err != nil {
 		return err
 	}
-	pipe.HSet(ctx, workspaceFSInfoKey(fsKey), map[string]interface{}{
-		"schema_version":   workspaceFSSchemaVersion,
-		"files":            fileCount,
-		"directories":      dirCount,
-		"symlinks":         symlinkCount,
-		"total_data_bytes": totalData,
+	writes = append(writes, func(pipe redis.Pipeliner) {
+		pipe.HSet(ctx, workspaceFSInfoKey(fsKey), map[string]interface{}{
+			"schema_version":   workspaceFSSchemaVersion,
+			"files":            fileCount,
+			"directories":      dirCount,
+			"symlinks":         symlinkCount,
+			"total_data_bytes": totalData,
+		})
+		pipe.Set(ctx, workspaceFSNextInodeKey(fsKey), nodes[len(nodes)-1].ID, 0)
 	})
-	pipe.Set(ctx, workspaceFSNextInodeKey(fsKey), nodes[len(nodes)-1].ID, 0)
 	return flush()
 }
 

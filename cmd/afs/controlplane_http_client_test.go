@@ -34,52 +34,6 @@ func TestHTTPControlPlaneClientSessionPathFallsBackToWorkspaceRoute(t *testing.T
 	}
 }
 
-func TestHTTPControlPlaneClientAddWorkspaceCompositionMountAcceptsCreated(t *testing.T) {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
-		}
-		if r.URL.Path != "/v2/workspaces/ws_agent/mounts" {
-			t.Fatalf("path = %q, want workspace composition mounts route", r.URL.Path)
-		}
-		var req controlplane.WorkspaceCompositionMount
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("Decode(request) returned error: %v", err)
-		}
-		if req.VolumeID != "ws_volume" || req.MountPath != "/repo" {
-			t.Fatalf("request = %+v, want selected volume at /repo", req)
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(controlplane.WorkspaceCompositionDetail{
-			ID:   "ws_agent",
-			Name: "coding-agent",
-			Mounts: []controlplane.WorkspaceCompositionMount{{
-				VolumeID:   "ws_volume",
-				VolumeName: "repo",
-				MountPath:  "/repo",
-			}},
-		})
-	}))
-	defer server.Close()
-
-	client := &httpControlPlaneClient{
-		baseURL: server.URL,
-		client:  &http.Client{Timeout: time.Minute},
-	}
-	detail, err := client.AddWorkspaceCompositionMount(context.Background(), "ws_agent", controlplane.WorkspaceCompositionMount{
-		VolumeID:  "ws_volume",
-		MountPath: "/repo",
-	})
-	if err != nil {
-		t.Fatalf("AddWorkspaceCompositionMount() returned error: %v", err)
-	}
-	if detail.Name != "coding-agent" || len(detail.Mounts) != 1 || detail.Mounts[0].VolumeID != "ws_volume" {
-		t.Fatalf("detail = %+v, want attached volume response", detail)
-	}
-}
-
 func TestHTTPControlPlaneClientQueryUsesLongRunningClient(t *testing.T) {
 	t.Helper()
 

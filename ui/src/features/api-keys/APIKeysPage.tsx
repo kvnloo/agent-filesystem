@@ -21,7 +21,6 @@ import {
   useRevokeCLIAccessTokenMutation,
   useRevokeControlPlaneTokenMutation,
   useRevokeMCPAccessTokenMutation,
-  useWorkspaceCompositions,
   useWorkspaceSummaries,
 } from "../../foundation/hooks/use-afs";
 import { isControlPlaneScope } from "../../foundation/types/afs";
@@ -36,8 +35,8 @@ const COMMANDS: CommandsDrawerConfig = {
   sections: [
     {
       title: "Run local stdio MCP",
-      description: "Volume-scoped, runs from your shell.",
-      command: "afs mcp --volume my-volume --profile workspace-rw",
+      description: "Workspace-scoped, runs from your shell.",
+      command: "afs mcp --workspace my-workspace --profile workspace-rw",
     },
     {
       title: "Add to Codex CLI",
@@ -82,11 +81,10 @@ export function APIKeysPage({ search, basePath = "/api-keys" }: Props) {
   const queriesEnabled =
     !auth.isLoading && (!auth.config.enabled || auth.isAuthenticated);
   const databasesQuery = useDatabases(queriesEnabled);
-  const volumesQuery = useWorkspaceSummaries(
+  const workspacesQuery = useWorkspaceSummaries(
     search.databaseId ?? null,
     queriesEnabled,
   );
-  const compositionsQuery = useWorkspaceCompositions(queriesEnabled);
   const apiKeys = useAllAPIKeys(queriesEnabled);
   const revokeWorkspaceToken = useRevokeMCPAccessTokenMutation();
   const revokeControlPlaneToken = useRevokeControlPlaneTokenMutation();
@@ -98,18 +96,13 @@ export function APIKeysPage({ search, basePath = "/api-keys" }: Props) {
   const workspaceId = search.workspaceId;
   const databaseId = search.databaseId;
 
-  // Resolve workspace ids (composition ids) and legacy volume ids so the
-  // table can label rows regardless of which generation they came from.
   const workspaceNameById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const volume of volumesQuery.data ?? []) {
-      map.set(volume.id, volume.name);
-    }
-    for (const composition of compositionsQuery.data ?? []) {
-      map.set(composition.id, composition.name);
+    for (const workspace of workspacesQuery.data ?? []) {
+      map.set(workspace.id, workspace.name);
     }
     return map;
-  }, [volumesQuery.data, compositionsQuery.data]);
+  }, [workspacesQuery.data]);
   const databaseNameById = useMemo(
     () =>
       new Map(
@@ -230,7 +223,7 @@ export function APIKeysPage({ search, basePath = "/api-keys" }: Props) {
       <LocalMCPAccessDialog
         isOpen={localOpen}
         onClose={() => setLocalOpen(false)}
-        workspaces={volumesQuery.data ?? []}
+        workspaces={workspacesQuery.data ?? []}
         initialWorkspaceId={workspaceId}
         initialDatabaseId={databaseId}
       />

@@ -136,16 +136,12 @@ func (c *nativeClient) Insert(ctx context.Context, p string, afterLine int, cont
 	}
 
 	newContent := joinLines(newLines)
-	delta := int64(len(newContent)) - inode.Size
 	inode.Content = newContent
 	inode.Size = int64(len(newContent))
 	now := nowMs()
 	inode.MtimeMs = now
 	inode.AtimeMs = now
 	if err := c.saveInode(ctx, resolved, inode); err != nil {
-		return err
-	}
-	if err := c.adjustTotalData(ctx, delta); err != nil {
 		return err
 	}
 	afterSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)
@@ -192,16 +188,12 @@ func (c *nativeClient) Replace(ctx context.Context, p string, old, new string, a
 		return 0, nil
 	}
 
-	delta := int64(len(newContent)) - inode.Size
 	inode.Content = newContent
 	inode.Size = int64(len(newContent))
 	now := nowMs()
 	inode.MtimeMs = now
 	inode.AtimeMs = now
 	if err := c.saveInode(ctx, resolved, inode); err != nil {
-		return 0, err
-	}
-	if err := c.adjustTotalData(ctx, delta); err != nil {
 		return 0, err
 	}
 	afterSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)
@@ -248,16 +240,12 @@ func (c *nativeClient) DeleteLines(ctx context.Context, p string, start, end int
 	newLines = append(newLines, lines[end:]...)
 
 	newContent := joinLines(newLines)
-	delta := int64(len(newContent)) - inode.Size
 	inode.Content = newContent
 	inode.Size = int64(len(newContent))
 	now := nowMs()
 	inode.MtimeMs = now
 	inode.AtimeMs = now
 	if err := c.saveInode(ctx, resolved, inode); err != nil {
-		return 0, err
-	}
-	if err := c.adjustTotalData(ctx, delta); err != nil {
 		return 0, err
 	}
 	afterSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)

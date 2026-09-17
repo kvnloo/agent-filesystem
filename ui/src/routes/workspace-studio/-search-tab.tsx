@@ -93,7 +93,7 @@ export function SearchTab({ workspace }: Props) {
           <SectionHeader>
             <SectionTitle
               title="Search Index Status"
-              body="BM25 keyword index state for this volume."
+              body="BM25 keyword index state for this workspace."
             />
             <Button
               size="medium"
@@ -163,7 +163,7 @@ export function SearchTab({ workspace }: Props) {
         <SectionCard $span={12}>
           <SectionHeader>
             <SectionTitle
-              title="Search Volume"
+              title="Search Workspace"
               body="Run the same ranked retrieval that agents get through file_query."
             />
           </SectionHeader>
@@ -229,7 +229,7 @@ export function SearchTab({ workspace }: Props) {
             <DialogError role="alert">
               {queryWorkspace.error instanceof Error
                 ? queryWorkspace.error.message
-                : "Volume query failed."}
+                : "Workspace query failed."}
             </DialogError>
           ) : null}
           {queryResult ? <QueryResults response={queryResult} /> : null}
@@ -254,7 +254,7 @@ export function SearchTab({ workspace }: Props) {
                   Rebuild index
                 </DialogTitle>
                 <DialogBody>
-                  Rebuild BM25 query chunks for the selected volume path.
+                  Rebuild BM25 query chunks for the selected workspace path.
                 </DialogBody>
               </div>
               <DialogCloseButton
@@ -489,7 +489,7 @@ function embeddingStatusText(status?: AFSWorkspaceQueryEmbeddingStatus) {
 
 function lineRange(result: { startLine?: number; endLine?: number }) {
   if (!result.startLine) {
-    return "Volume chunk";
+    return "Workspace chunk";
   }
   if (!result.endLine || result.endLine === result.startLine) {
     return `Line ${result.startLine}`;

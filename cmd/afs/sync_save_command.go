@@ -59,17 +59,17 @@ func parseSyncSaveOptions(args []string) (syncSaveOptions, error) {
 			}
 		}
 		if opts.target != "" {
-			return opts, errors.New("save requires exactly one volume or mount directory")
+			return opts, errors.New("save requires exactly one workspace or mount directory")
 		}
 		opts.target = strings.TrimSpace(arg)
 	}
 	if !opts.help && opts.target == "" {
-		return opts, errors.New("save requires a volume or mount directory")
+		return opts, errors.New("save requires a workspace or mount directory")
 	}
 	return opts, nil
 }
 
-func cmdVolumeSave(args []string) error {
+func cmdWorkspaceSave(args []string) error {
 	opts, err := parseSyncSaveOptions(args)
 	result := syncControlResult{Version: syncControlVersion, Operation: syncControlOpSave}
 	if err != nil {
@@ -123,7 +123,7 @@ func resolveSyncSaveMount(cfg config, target string) (mountRecord, error) {
 		}
 	}
 	if len(matches) > 1 {
-		return mountRecord{}, fmt.Errorf("volume %q matches multiple mounts; specify the exact mount directory", target)
+		return mountRecord{}, fmt.Errorf("workspace %q matches multiple mounts; specify the exact mount directory", target)
 	}
 	if len(matches) == 1 {
 		rec := matches[0]
@@ -165,10 +165,10 @@ func validateSyncSaveMount(rec mountRecord) error {
 		return errors.New("cannot save a readonly sync mount")
 	}
 	if rec.PID <= 0 || !processAlive(rec.PID) {
-		return errors.New("sync daemon is not running; mount the volume before saving")
+		return errors.New("sync daemon is not running; mount the workspace before saving")
 	}
 	if syncSaveVolume(rec) == "" {
-		return errors.New("mounted volume identity is missing")
+		return errors.New("mounted workspace identity is missing")
 	}
 	if strings.TrimSpace(rec.LocalPath) == "" {
 		return errors.New("local sync root is missing")
@@ -213,7 +213,7 @@ func runSyncSaveControlRequest(localRoot string, request syncControlRequest) (sy
 	}
 	if reply.Version != syncControlVersion || reply.Operation != syncControlOpSave ||
 		reply.Volume != request.Volume || reply.LocalRoot != request.LocalRoot {
-		return result, errors.New("save result does not match the requested volume and local root")
+		return result, errors.New("save result does not match the requested workspace and local root")
 	}
 	if !reply.Success {
 		if reply.Error == "" {
@@ -227,13 +227,25 @@ func runSyncSaveControlRequest(localRoot string, request syncControlRequest) (sy
 	return reply, nil
 }
 
+// syncSaveOutput is the public CLI result. The private daemon transport keeps
+// its older field name so a rebuilt CLI can still contact an existing daemon.
+type syncSaveOutput struct {
+	Version   int              `json:"version"`
+	Operation string           `json:"operation"`
+	Success   bool             `json:"success"`
+	Error     string           `json:"error,omitempty"`
+	Workspace string           `json:"workspace,omitempty"`
+	LocalRoot string           `json:"local_root,omitempty"`
+	Save      *syncSaveReceipt `json:"save,omitempty"`
+}
+
 func printSyncSaveResult(result syncControlResult, err error, jsonOut bool) error {
 	if err != nil {
 		result.Success = false
 		result.Error = err.Error()
 	}
 	if jsonOut {
-		if outputErr := json.NewEncoder(os.Stdout).Encode(result); outputErr != nil {
+		if outputErr := json.NewEncoder(os.Stdout).Encode(syncSaveOutput{Version: result.Version, Operation: result.Operation, Success: result.Success, Error: result.Error, Workspace: result.Volume, LocalRoot: result.LocalRoot, Save: result.Save}); outputErr != nil {
 			return outputErr
 		}
 		return err
@@ -241,8 +253,8 @@ func printSyncSaveResult(result syncControlResult, err error, jsonOut bool) erro
 	if err != nil {
 		return err
 	}
-	printSection("Volume saved", []outputRow{
-		{Label: "volume", Value: result.Volume}, {Label: "path", Value: result.LocalRoot},
+	printSection("Workspace saved", []outputRow{
+		{Label: "workspace", Value: result.Volume}, {Label: "path", Value: result.LocalRoot},
 		{Label: "files", Value: fmt.Sprint(result.Save.Files)}, {Label: "bytes", Value: fmt.Sprint(result.Save.Bytes)},
 		{Label: "verified", Value: "Redis visibility"},
 	})
@@ -251,10 +263,10 @@ func printSyncSaveResult(result syncControlResult, err error, jsonOut bool) erro
 
 func syncSaveUsageText(bin string) string {
 	return fmt.Sprintf(`Usage:
-  %s vol save [--timeout 2m] [--json] <volume|directory>
+  %s ws save [--timeout 2m] [--json] <workspace|directory>
 
 Stop all application and remote writers, then save one complete mounted sync
-volume. A successful result verifies actual file bytes and metadata in Redis.
+workspace. A successful result verifies actual file bytes and metadata in Redis.
 Ignored paths are excluded. The sync daemon resumes after the operation.
 
 Errors, conflicts, changes during verification, or timeout return failure.

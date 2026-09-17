@@ -102,7 +102,7 @@ export function SettingsTab({
     <SectionGrid>
       <SectionCard $span={12}>
         <SectionHeader>
-          <SectionTitle title="Volume details" />
+          <SectionTitle title="Workspace details" />
         </SectionHeader>
 
         <FormGrid
@@ -126,7 +126,7 @@ export function SettingsTab({
           }}
         >
           <Field>
-            Volume name
+            Workspace name
             <TextInput
               name="name"
               value={detailsName}
@@ -143,7 +143,7 @@ export function SettingsTab({
               onChange={(event) =>
                 setDetailsDescription(event.currentTarget.value)
               }
-              placeholder="What this volume stores, who owns it, and why it exists."
+              placeholder="What this workspace stores, who owns it, and why it exists."
             />
           </Field>
 
@@ -165,7 +165,7 @@ export function SettingsTab({
         <MetaTable>
           <tbody>
             <MetaRow>
-              <MetaLabel>Volume ID</MetaLabel>
+              <MetaLabel>Workspace ID</MetaLabel>
               <MetaValue>
                 <MonoValue>{workspace.id}</MonoValue>
               </MetaValue>
@@ -221,7 +221,7 @@ export function SettingsTab({
                   <StorageText>
                     {queryIndexStatus.data
                       ? `RedisSearch BM25 query is ${queryIndexStatus.data.state}. ${queryIndexStatus.data.keyword.ready} file${queryIndexStatus.data.keyword.ready === 1 ? "" : "s"} ready across ${queryIndexStatus.data.keyword.chunks} chunk${queryIndexStatus.data.keyword.chunks === 1 ? "" : "s"}.`
-                      : "AFS is checking the BM25 query index for this volume."}
+                      : "AFS is checking the BM25 query index for this workspace."}
                   </StorageText>
                   {queryIndexStatus.data?.keyword.indexName ? (
                     <MonoValue>{queryIndexStatus.data.keyword.indexName}</MonoValue>
@@ -245,7 +245,7 @@ export function SettingsTab({
         </SectionHeader>
 
         <VersioningCopy>
-          The live file tree still shows only the latest volume state. This
+          The live file tree still shows only the latest workspace state. This
           policy controls which paths get immutable per-file history behind the
           scenes and how aggressively old versions are retained.
         </VersioningCopy>
@@ -267,7 +267,7 @@ export function SettingsTab({
                 maxAgeDays: parseWholeNumber(maxAgeDays, "Max age (days)"),
                 maxTotalBytes: parseWholeNumber(
                   maxTotalBytes,
-                  "Volume budget (bytes)",
+                  "Workspace budget (bytes)",
                 ),
                 largeFileCutoffBytes: parseWholeNumber(
                   largeFileCutoffBytes,
@@ -410,7 +410,7 @@ export function SettingsTab({
             </Field>
 
             <Field>
-              Volume budget (bytes)
+              Workspace budget (bytes)
               <TextInput
                 value={maxTotalBytes}
                 onChange={(event) =>
@@ -469,10 +469,10 @@ export function SettingsTab({
 
       <DangerZoneCard>
         <DangerZoneHeader>
-          <DangerZoneTitle>Delete volume</DangerZoneTitle>
+          <DangerZoneTitle>Delete workspace</DangerZoneTitle>
           <DangerZoneDesc>
             Permanently remove <strong>{workspace.name}</strong> from the
-            volume registry.
+            workspace registry.
           </DangerZoneDesc>
         </DangerZoneHeader>
         <DangerZoneActions>
@@ -481,7 +481,7 @@ export function SettingsTab({
             disabled={isDeleting}
             onClick={onDelete}
           >
-            {isDeleting ? "Deleting..." : "Delete volume"}
+            {isDeleting ? "Deleting..." : "Delete workspace"}
           </DeleteWorkspaceButton>
         </DangerZoneActions>
       </DangerZoneCard>
@@ -872,7 +872,7 @@ function storageProfileDescription(storage: AFSWorkspaceContentStorage) {
     case "legacy":
       return `All ${storage.fileCount} file${storage.fileCount === 1 ? "" : "s"} use legacy Redis string content keys.`;
     default:
-      return "This volume does not have any file content stored yet.";
+      return "This workspace does not have any file content stored yet.";
   }
 }
 
@@ -948,13 +948,13 @@ function searchIndexDescription(index: AFSWorkspaceSearchIndex) {
     case "building":
       return `Search index exists and is ${formatPercent(index.percentIndexed)} indexed.`;
     case "missing":
-      return "No RediSearch index exists for this volume yet.";
+      return "No RediSearch index exists for this workspace yet.";
     case "unavailable":
       return "RediSearch is not available on this Redis database.";
     case "error":
       return index.error
-        ? `AFS could not inspect this volume index: ${index.error}`
-        : "AFS could not inspect this volume index.";
+        ? `AFS could not inspect this workspace index: ${index.error}`
+        : "AFS could not inspect this workspace index.";
     default:
       return "AFS could not determine search index state.";
   }

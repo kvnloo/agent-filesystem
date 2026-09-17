@@ -357,7 +357,7 @@ func loadConfigForUpWithIOAndOverridesAndMode(args []string, overrides configOve
 		}
 		changed = true
 	default:
-		return cfg, fmt.Errorf("expected at most <volume> <directory>\nUse '%s vol mount <volume> <directory>'", filepath.Base(os.Args[0]))
+		return cfg, fmt.Errorf("expected at most <workspace> <directory>\nUse '%s ws mount <workspace> <directory>'", filepath.Base(os.Args[0]))
 	}
 
 	if err := validateUpModeSelection(cfg); err != nil {
@@ -425,7 +425,7 @@ func applyUpWorkspaceAndMountpoint(cfg *config, workspace, mountpoint string) er
 			return err
 		}
 		if backendName == mountBackendNone {
-			return fmt.Errorf("filesystem mounts are disabled in config\nRun '%s config set --mount-backend nfs' or use sync mode with '%s vol mount <volume> <directory>'", filepath.Base(os.Args[0]), filepath.Base(os.Args[0]))
+			return fmt.Errorf("filesystem mounts are disabled in config\nRun '%s config set --mount-backend nfs' or use sync mode with '%s ws mount <workspace> <directory>'", filepath.Base(os.Args[0]), filepath.Base(os.Args[0]))
 		}
 	}
 
@@ -545,10 +545,10 @@ func promptForMissingUpConfig(cfg *config, presence upConfigPresence, r *bufio.R
 		return false, nil
 	}
 	if missingWorkspace {
-		return false, fmt.Errorf("volume is required\nRun '%s vol mount <volume> <directory>'", filepath.Base(os.Args[0]))
+		return false, fmt.Errorf("workspace is required\nRun '%s ws mount <workspace> <directory>'", filepath.Base(os.Args[0]))
 	}
 	if !allowPrompt {
-		return false, fmt.Errorf("config is missing settings required to mount a volume\nRun '%s vol mount <volume> <directory>' or use an interactive terminal for legacy up prompts", filepath.Base(os.Args[0]))
+		return false, fmt.Errorf("config is missing settings required to mount a workspace\nRun '%s ws mount <workspace> <directory>' or use an interactive terminal for legacy up prompts", filepath.Base(os.Args[0]))
 	}
 
 	changed := false
@@ -808,8 +808,8 @@ Notes:
   Keys are case-insensitive.
   sync.watcherQueueCapacity accepts 1..1048576; 0 resets to 1024.
   Use "self-managed" for the control-plane-backed mode.
-  Volume mounts are runtime state; use '%s vol mount <volume> <directory>'.
-  Default volume is managed with '%s vol set-default <volume>'.
+  Workspace mounts are runtime state; use '%s ws mount <workspace> <directory>'.
+  Default workspace is managed with '%s ws set-default <workspace>'.
 `, bin, bin, bin, bin, bin, bin, bin, bin, bin, bin, bin)
 }
 

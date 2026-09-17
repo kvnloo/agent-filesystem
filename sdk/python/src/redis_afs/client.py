@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import os
 import posixpath
-import re
 import shutil
 import subprocess
 import tempfile
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,41 +145,24 @@ class FSClient:
     def mount(
         self,
         *,
-        workspaces: Sequence[Mapping[str, Any]] | None = None,
-        repos: Sequence[Mapping[str, Any]] | None = None,
+        workspace: str | Mapping[str, Any],
         mode: MountMode | str = MountMode.RW,
         token_name: str | None = None,
     ) -> MountedFS:
-        workspace_refs = list(workspaces if workspaces is not None else repos or [])
-        if not workspace_refs:
-            raise AFSError("fs.mount requires at least one workspace")
-        profile = MountMode.coerce(mode).profile
-        mounted: list[_MountedWorkspace] = []
-        for workspace in workspace_refs:
-            name = _workspace_name(workspace)
-            issued = self._control_plane.call_tool(
-                "mcp_token_issue",
-                {
-                    "workspace": name,
-                    "name": token_name or f"redis-afs {name}",
-                    "profile": profile,
-                },
-            )
-            token = str(issued.get("token", ""))
-            if not token:
-                raise AFSError(f"mcp_token_issue did not return a token for {name}", payload=issued)
-            mounted.append(
-                _MountedWorkspace(
-                    name=name,
-                    token=token,
-                    client=MCPHttpClient(
-                        api_key=token,
-                        base_url=issued.get("url") or self._control_plane.endpoint,
-                        timeout=self._control_plane.timeout,
-                    ),
-                )
-            )
-        return MountedFS(mounted, mode=mode)
+        name = _workspace_name(workspace)
+        issued = self._control_plane.call_tool("mcp_token_issue", {
+            "workspace": name,
+            "name": token_name or f"redis-afs {name}",
+            "profile": MountMode.coerce(mode).profile,
+        })
+        token = str(issued.get("token", ""))
+        if not token:
+            raise AFSError(f"mcp_token_issue did not return a token for {name}", payload=issued)
+        return MountedFS(_MountedWorkspace(name=name, token=token, client=MCPHttpClient(
+            api_key=token,
+            base_url=issued.get("url") or self._control_plane.endpoint,
+            timeout=self._control_plane.timeout,
+        )), mode=mode)
 
 
 @dataclass(frozen=True)
@@ -191,21 +173,16 @@ class _MountedWorkspace:
 
 
 class MountedFS:
-    def __init__(self, workspaces: Sequence[_MountedWorkspace], *, mode: str = "rw") -> None:
-        self._workspaces = list(workspaces)
-        self._workspaces_by_name = {workspace.name: workspace for workspace in self._workspaces}
-        if len(self._workspaces_by_name) != len(self._workspaces):
-            raise AFSError("workspaces must be mounted at most once")
+    def __init__(self, workspace: _MountedWorkspace, *, mode: str = "rw") -> None:
+        if not isinstance(workspace, _MountedWorkspace):
+            raise AFSError("mount requires one workspace")
+        self._workspace = workspace
         self.mode = mode
         self._local_root: tempfile.TemporaryDirectory[str] | None = None
 
     @property
-    def repo_names(self) -> list[str]:
-        return self.workspace_names
-
-    @property
-    def workspace_names(self) -> list[str]:
-        return [workspace.name for workspace in self._workspaces]
+    def workspace_name(self) -> str:
+        return self._workspace.name
 
     @property
     def local_root(self) -> str | None:
@@ -225,7 +202,7 @@ class MountedFS:
         text = content.decode("utf-8") if isinstance(content, bytes) else content
         workspace.client.call_tool("file_write", {"path": remote_path, "content": text})
         if self.local_root:
-            local_path = self._local_path_for(workspace.name, remote_path)
+            local_path = self._local_path_for(remote_path)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text(text, encoding="utf-8")
 
@@ -256,7 +233,7 @@ class MountedFS:
         workspace, remote_path = self._resolve_path(path)
         response = workspace.client.call_tool("file_delete", {"path": remote_path})
         if self.local_root:
-            local_path = self._local_path_for(workspace.name, remote_path)
+            local_path = self._local_path_for(remote_path)
             if local_path.is_dir() and not local_path.is_symlink():
                 shutil.rmtree(local_path, ignore_errors=True)
             else:
@@ -266,28 +243,22 @@ class MountedFS:
                     pass
         return response
 
-    def checkpoint(self, name: str | None = None) -> list[dict[str, Any]]:
-        return [workspace.client.call_tool("checkpoint_create", {"checkpoint": name}) for workspace in self._workspaces]
+    def checkpoint(self, name: str | None = None) -> dict[str, Any]:
+        return self._workspace.client.call_tool("checkpoint_create", {"checkpoint": name})
 
     def bash(self) -> BashRunner:
         return BashRunner(self)
 
     def sync_from_remote(self) -> str:
-        root = self._ensure_local_root()
-        for workspace in self._workspaces:
-            workspace_root = Path(root, workspace.name)
-            shutil.rmtree(workspace_root, ignore_errors=True)
-            workspace_root.mkdir(parents=True, exist_ok=True)
-            self._copy_remote_directory(workspace, "/", workspace_root)
-        return root
+        root = Path(self._ensure_local_root())
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        self._copy_remote_directory(self._workspace, "/", root)
+        return str(root)
 
     def sync_to_remote(self) -> None:
-        if not self.local_root:
-            return
-        for workspace in self._workspaces:
-            workspace_root = Path(self.local_root, workspace.name)
-            if workspace_root.exists():
-                self._copy_local_directory(workspace, workspace_root, "/")
+        if self.local_root:
+            self._copy_local_directory(self._workspace, Path(self.local_root), "/")
 
     def close(self) -> None:
         if self._local_root:
@@ -300,42 +271,19 @@ class MountedFS:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.close()
 
-    def map_absolute_workspace_paths(self, command: str) -> str:
-        if not self.local_root:
-            return command
-        out = command
-        for name in sorted(self.workspace_names, key=len, reverse=True):
-            remote_prefix = f"/{name}"
-            local_prefix = str(Path(self.local_root, name)).replace("\\", "/")
-            out = re.sub(rf"{re.escape(remote_prefix)}(?=/|\s|$)", local_prefix, out)
-        return out
-
-    def map_absolute_repo_paths(self, command: str) -> str:
-        return self.map_absolute_workspace_paths(command)
-
     def _resolve_path(self, raw_path: str) -> tuple[_MountedWorkspace, str]:
-        normalized = _normalize_remote_path(raw_path)
-        for name in sorted(self.workspace_names, key=len, reverse=True):
-            prefix = f"/{name}"
-            if normalized == prefix:
-                return self._workspaces_by_name[name], "/"
-            if normalized.startswith(f"{prefix}/"):
-                return self._workspaces_by_name[name], normalized[len(prefix) :] or "/"
-        if len(self._workspaces) == 1:
-            return self._workspaces[0], normalized
-        choices = ", ".join(f"/{name}" for name in self.workspace_names)
-        raise AFSError(f"path {raw_path} must start with one of: {choices}")
+        return self._workspace, _normalize_remote_path(raw_path)
 
     def _ensure_local_root(self) -> str:
         if not self._local_root:
             self._local_root = tempfile.TemporaryDirectory(prefix="afs-fs-")
         return self._local_root.name
 
-    def _local_path_for(self, workspace_name: str, remote_path: str) -> Path:
+    def _local_path_for(self, remote_path: str) -> Path:
         if not self.local_root:
             raise AFSError("mount has not been materialized locally yet")
         relative = _normalize_remote_path(remote_path).lstrip("/")
-        return Path(self.local_root, workspace_name, relative)
+        return Path(self.local_root, relative)
 
     def _copy_remote_directory(self, workspace: _MountedWorkspace, remote_path: str, local_path: Path) -> None:
         response = workspace.client.call_tool("file_list", {"path": remote_path, "depth": 1})
@@ -384,7 +332,7 @@ class BashRunner:
         check: bool = False,
     ) -> BashResult:
         root = self._fs.sync_from_remote()
-        mapped_command = self._fs.map_absolute_workspace_paths(command)
+        mapped_command = command
         run_env: MutableMapping[str, str] = dict(os.environ)
         if env:
             for key, value in env.items():

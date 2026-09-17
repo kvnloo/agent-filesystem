@@ -418,32 +418,13 @@ func TestSelfHostedAccessTokenLoginPreservesBearerForWorkspaceList(t *testing.T)
 				Items: []controlplane.WorkspaceSummary{
 					{
 						ID:         "ws_volume_one",
-						Name:       "volume-one",
-						DatabaseID: "localhost-6379",
-					},
-					{
-						ID:         "ws_volume_two",
-						Name:       "volume-two",
+						Name:       "workspace-one",
 						DatabaseID: "localhost-6379",
 					},
 				},
 			})
-		case r.URL.Path == "/v2/workspaces" && r.Method == http.MethodGet:
-			if got := strings.TrimSpace(r.Header.Get("Authorization")); got != "Bearer "+token {
-				http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(controlplane.WorkspaceCompositionListResponse{
-				Items: []controlplane.WorkspaceCompositionSummary{
-					{
-						ID:         "ws_snake",
-						Name:       "snake",
-						DatabaseID: "localhost-6379",
-						UpdatedAt:  "2026-05-12T07:05:48Z",
-					},
-				},
-			})
+		case strings.HasPrefix(r.URL.Path, "/v2/"):
+			t.Fatal("login must not request retired composition routes")
 		case r.URL.Path == "/v1/databases":
 			t.Fatalf("workspace-scoped access token login should not require database inventory")
 		default:
@@ -468,18 +449,18 @@ func TestSelfHostedAccessTokenLoginPreservesBearerForWorkspaceList(t *testing.T)
 	if cfg.AuthToken != token {
 		t.Fatalf("AuthToken = %q, want %q", cfg.AuthToken, token)
 	}
-	if cfg.CurrentWorkspace != "snake" || cfg.CurrentWorkspaceID != "ws_snake" {
-		t.Fatalf("CurrentWorkspace = %q/%q, want snake/ws_snake from Agent Workspace list", cfg.CurrentWorkspace, cfg.CurrentWorkspaceID)
+	if cfg.CurrentWorkspace != "workspace-one" || cfg.CurrentWorkspaceID != "ws_volume_one" {
+		t.Fatalf("CurrentWorkspace = %q/%q, want workspace-one/ws_volume_one from workspace list", cfg.CurrentWorkspace, cfg.CurrentWorkspaceID)
 	}
 
 	out, err := captureStdout(t, func() error {
-		return cmdWorkspaceManifestList([]string{"ws", "list"})
+		return cmdWorkspaceList([]string{"ws", "list"})
 	})
 	if err != nil {
-		t.Fatalf("cmdWorkspaceManifestList() returned error: %v", err)
+		t.Fatalf("cmdWorkspaceList() returned error: %v", err)
 	}
-	if !strings.Contains(out, "snake") {
-		t.Fatalf("cmdWorkspaceManifestList() output = %q, want snake", out)
+	if !strings.Contains(out, "workspace-one") {
+		t.Fatalf("cmdWorkspaceList() output = %q, want workspace-one", out)
 	}
 }
 

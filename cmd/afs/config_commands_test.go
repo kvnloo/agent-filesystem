@@ -815,10 +815,10 @@ func TestLoadConfigForUpRejectsMissingWorkspaceEvenWhenPromptingAllowed(t *testi
 	if err == nil {
 		t.Fatal("loadConfigForUpWithIO() returned nil error, want missing workspace error")
 	}
-	if !strings.Contains(err.Error(), "volume is required") {
+	if !strings.Contains(err.Error(), "workspace is required") {
 		t.Fatalf("loadConfigForUpWithIO() error = %q, want missing workspace message", err)
 	}
-	if !strings.Contains(err.Error(), "vol mount <volume> <directory>") {
+	if !strings.Contains(err.Error(), "ws mount <workspace> <directory>") {
 		t.Fatalf("loadConfigForUpWithIO() error = %q, want workspace selection guidance", err)
 	}
 }
@@ -863,7 +863,7 @@ func TestCmdConfigSetHelpListsDetailedFlags(t *testing.T) {
 		"--redis-url <redis://...|rediss://...>",
 		"--config-source local|self-hosted|cloud",
 		"--mount-backend auto|none|fuse|nfs",
-		"Default volume is managed with",
+		"Default workspace is managed with",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("config set help output = %q, want substring %q", out, want)
@@ -1027,41 +1027,17 @@ func TestCmdWorkspaceHelpListsSubcommands(t *testing.T) {
 		t.Fatalf("cmdWorkspace(--help) returned error: %v", err)
 	}
 
-	for _, want := range []string{
-		"workspace <subcommand>",
-		"create <workspace>",
-		"Create an Agent Workspace manifest",
-		"list",
-		"show <workspace>",
-		"add <workspace> <directory>",
-		"attach <workspace> [volume] [--at <path>]",
-		"detach <workspace> <volume>",
-		"mount <workspace> <directory>",
-		"bookmark create <workspace> <name>",
-		"workspace create coding-agent",
-	} {
+	for _, want := range []string{"workspace <subcommand>", "create <workspace>", "Create one empty file tree", "import <workspace> <directory>", "show [workspace]", "mount [<workspace> [directory]]", "save [--timeout 2m]", "fork [source-workspace]", "config <subcommand>"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("workspace help output = %q, want substring %q", out, want)
+			t.Fatalf("workspace help missing %q: %s", want, out)
 		}
 	}
-	if strings.Contains(out, "run [workspace]") {
-		t.Fatalf("workspace help output = %q, did not expect removed run subcommand", out)
-	}
-	for _, removed := range []string{
-		"use <workspace>",
-		"current                                      Show",
-		"versioning <get|set>",
-		"config <workspace> <get|set|unset|list>",
-		"clone [workspace] <directory>",
-		"import [--force] [--mount-at-source]",
-		"remove <workspace> <volume>",
-		"mount-volume",
-		"unmount-volume",
-	} {
+	for _, removed := range []string{"Agent Workspace", "manifest", "bookmark", "attach", "detach", "run [workspace]"} {
 		if strings.Contains(out, removed) {
-			t.Fatalf("workspace help output = %q, did not expect removed subcommand %q", out, removed)
+			t.Fatalf("obsolete workspace help %q: %s", removed, out)
 		}
 	}
+
 }
 
 func TestCmdWorkspaceRunReportsRemovedCommand(t *testing.T) {
@@ -1107,9 +1083,9 @@ func TestCmdCheckpointHelpListsSubcommands(t *testing.T) {
 
 	for _, want := range []string{
 		"checkpoint <subcommand>",
-		"create [volume] [checkpoint]",
-		"diff [volume] <base> <target>",
-		"restore [volume] <checkpoint>",
+		"create [workspace] [checkpoint]",
+		"diff [workspace] <base> <target>",
+		"restore [workspace] <checkpoint>",
 		"checkpoint diff demo initial before-refactor",
 		"checkpoint restore demo initial",
 	} {
@@ -1130,8 +1106,8 @@ func TestCmdCheckpointRestoreHelpExplainsLiveRestoreBehavior(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Restore volume state to the selected checkpoint",
-		"cp restore [volume] <checkpoint>",
+		"Restore workspace state to the selected checkpoint",
+		"cp restore [workspace] <checkpoint>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("checkpoint restore help output = %q, want substring %q", out, want)

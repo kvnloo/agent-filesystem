@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import AFSError
@@ -115,7 +114,7 @@ class AsyncFSClient:
 
     async def _mount_one(
         self,
-        ref: Mapping[str, Any],
+        ref: str | Mapping[str, Any],
         *,
         profile: str,
         token_name: str | None,
@@ -145,27 +144,12 @@ class AsyncFSClient:
     async def mount(
         self,
         *,
-        workspaces: Sequence[Mapping[str, Any]] | None = None,
-        repos: Sequence[Mapping[str, Any]] | None = None,
+        workspace: str | Mapping[str, Any],
         mode: MountMode | str = MountMode.RW,
         token_name: str | None = None,
         concurrency: int = 16,
     ) -> AsyncMountedFS:
-        workspace_refs = list(workspaces if workspaces is not None else repos or [])
-        if not workspace_refs:
-            raise AFSError("fs.mount requires at least one workspace")
-        profile = MountMode.coerce(mode).profile
-        # Issue every workspace token concurrently; gather preserves input order.
-        results = await asyncio.gather(
-            *(self._mount_one(ref, profile=profile, token_name=token_name) for ref in workspace_refs),
-            return_exceptions=True,
-        )
-        mounted = [r for r in results if isinstance(r, _AsyncMountedWorkspace)]
-        failure = next((r for r in results if isinstance(r, BaseException)), None)
-        if failure is not None:
-            # Partial failure: close the children we did build before re-raising.
-            await asyncio.gather(*(m.client.aclose() for m in mounted), return_exceptions=True)
-            raise failure
+        mounted = await self._mount_one(workspace, profile=MountMode.coerce(mode).profile, token_name=token_name)
         return AsyncMountedFS(mounted, mode=mode, concurrency=concurrency)
 
 

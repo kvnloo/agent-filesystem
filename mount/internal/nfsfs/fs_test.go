@@ -374,17 +374,17 @@ func TestFSSetAttrsEmptyIsNoOp(t *testing.T) {
 // path in third_party/go-nfs: SetFileAttributes.Apply must notice that our
 // nfsfs.FS implements BatchSetAttrer and dispatch a single SetAttrs call
 // instead of the legacy Chmod / Lchown / Chtimes sequence. We verify by
-// counting HSET commands against inode keys — the fast path is one HSET,
+// counting successful atomic inode mutations — the fast path publishes once,
 // the legacy path would be three.
 func TestSetFileAttributesApplyDispatchesToBatchSetAttrer(t *testing.T) {
 	t.Parallel()
 	rdb, ctx := setupTestRedis(t)
 
 	const fsKey = "nfs-batchsetattrs"
-	var inodeHSets atomic.Int64
-	rdb.AddHook(&hsetCounterHook{
+	var inodeMutations atomic.Int64
+	rdb.AddHook(&inodeMutationCounterHook{
 		filter: ":inode:",
-		count:  &inodeHSets,
+		count:  &inodeMutations,
 	})
 
 	c := client.New(rdb, fsKey)
@@ -397,7 +397,7 @@ func TestSetFileAttributesApplyDispatchesToBatchSetAttrer(t *testing.T) {
 	uid := uint32(7000)
 	gid := uint32(7001)
 	// Pick atime/mtime that are definitely different from the seed mtime
-	// set by CreateFile so the no-op skip doesn't hide the HSET.
+	// set by CreateFile so the no-op skip doesn't hide the publication.
 	atime := time.UnixMilli(2000000000000)
 	mtime := time.UnixMilli(2000000001000)
 	sfa := &nfs.SetFileAttributes{
@@ -408,12 +408,12 @@ func TestSetFileAttributesApplyDispatchesToBatchSetAttrer(t *testing.T) {
 		SetMtime: &mtime,
 	}
 
-	inodeHSets.Store(0)
+	inodeMutations.Store(0)
 	if err := sfa.Apply(fs, fs, "/apply.txt"); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if got := inodeHSets.Load(); got != 1 {
-		t.Fatalf("SetFileAttributes.Apply issued %d HSETs against inode keys, want 1 (fast path)", got)
+	if got := inodeMutations.Load(); got != 1 {
+		t.Fatalf("SetFileAttributes.Apply issued %d atomic inode mutations, want 1 (fast path)", got)
 	}
 
 	// Double-check the values actually landed.
@@ -448,10 +448,10 @@ func TestSetFileAttributesApplyEmptyDiffIsFreeRider(t *testing.T) {
 	rdb, ctx := setupTestRedis(t)
 
 	const fsKey = "nfs-batchsetattrs-noop"
-	var inodeHSets atomic.Int64
-	rdb.AddHook(&hsetCounterHook{
+	var inodeMutations atomic.Int64
+	rdb.AddHook(&inodeMutationCounterHook{
 		filter: ":inode:",
-		count:  &inodeHSets,
+		count:  &inodeMutations,
 	})
 
 	c := client.New(rdb, fsKey)
@@ -479,52 +479,74 @@ func TestSetFileAttributesApplyEmptyDiffIsFreeRider(t *testing.T) {
 		SetMtime: &currentMtime,
 	}
 
-	inodeHSets.Store(0)
+	inodeMutations.Store(0)
 	if err := sfa.Apply(fs, fs, "/noop.txt"); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if got := inodeHSets.Load(); got != 0 {
-		t.Fatalf("Apply with no-op diff issued %d HSETs, want 0 (free-rider skip)", got)
+	if got := inodeMutations.Load(); got != 0 {
+		t.Fatalf("Apply with no-op diff issued %d atomic inode mutations, want 0 (free-rider skip)", got)
 	}
 }
 
-// hsetCounterHook is a tiny redis.Hook that increments `count` every time
-// an HSET command is issued against a key containing `filter`. Used by the
+// inodeMutationCounterHook counts successful inode HSETs or publication scripts.
+// Failed EVALSHA cache lookups are excluded. Used by the
 // BatchSetAttrer dispatcher tests.
-type hsetCounterHook struct {
+type inodeMutationCounterHook struct {
 	filter string
 	count  *atomic.Int64
 }
 
-func (h *hsetCounterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
-func (h *hsetCounterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+func (h *inodeMutationCounterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *inodeMutationCounterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		h.maybeCount(cmd)
-		return next(ctx, cmd)
-	}
-}
-func (h *hsetCounterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []redis.Cmder) error {
-		for _, cmd := range cmds {
+		err := next(ctx, cmd)
+		if err == nil {
 			h.maybeCount(cmd)
 		}
-		return next(ctx, cmds)
+		return err
 	}
 }
-func (h *hsetCounterHook) maybeCount(cmd redis.Cmder) {
+func (h *inodeMutationCounterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		err := next(ctx, cmds)
+		for _, cmd := range cmds {
+			if cmd.Err() == nil {
+				h.maybeCount(cmd)
+			}
+		}
+		return err
+	}
+}
+func (h *inodeMutationCounterHook) maybeCount(cmd redis.Cmder) {
 	args := cmd.Args()
 	if len(args) < 2 {
 		return
 	}
 	name, _ := args[0].(string)
-	if name != "hset" && name != "HSET" {
+	if name == "hset" || name == "HSET" {
+		key, _ := args[1].(string)
+		if h.filter == "" || containsString(key, h.filter) {
+			h.count.Add(1)
+		}
 		return
 	}
-	key, _ := args[1].(string)
-	if h.filter != "" && !containsString(key, h.filter) {
+	if name != "eval" && name != "evalsha" {
 		return
 	}
-	h.count.Add(1)
+	if len(args) < 4 {
+		return
+	}
+	keyCount, ok := args[2].(int)
+	if !ok {
+		return
+	}
+	for i := 3; i < 3+keyCount && i < len(args); i++ {
+		key, _ := args[i].(string)
+		if h.filter == "" || containsString(key, h.filter) {
+			h.count.Add(1)
+			return
+		}
+	}
 }
 
 func containsString(s, needle string) bool {

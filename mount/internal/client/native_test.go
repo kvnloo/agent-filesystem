@@ -848,7 +848,7 @@ func TestRmDirectoryPrunesStaleChildReferences(t *testing.T) {
 	t.Parallel()
 	rdb, ctx := setupTestRedis(t)
 	raw := New(rdb, "rm-stale-dirents")
-	c, ok := raw.(*nativeClient)
+	c, ok := raw.(*generationClient).Client.(*nativeClient)
 	if !ok {
 		t.Fatalf("client type = %T, want *nativeClient", raw)
 	}
@@ -1166,7 +1166,7 @@ func TestWarmPathCachePreloadsDeepExactPaths(t *testing.T) {
 	t.Parallel()
 	rdb, ctx := setupTestRedis(t)
 	raw := NewWithCache(rdb, "warm-path-cache", time.Hour)
-	c, ok := raw.(*nativeClient)
+	c, ok := raw.(*generationClient).Client.(*nativeClient)
 	if !ok {
 		t.Fatalf("client type = %T, want *nativeClient", raw)
 	}
@@ -1210,7 +1210,7 @@ func TestResolvePathUsesCachedRootInode(t *testing.T) {
 	t.Parallel()
 	rdb, ctx := setupTestRedis(t)
 	raw := NewWithCache(rdb, "warm-root-cache", time.Hour)
-	c, ok := raw.(*nativeClient)
+	c, ok := raw.(*generationClient).Client.(*nativeClient)
 	if !ok {
 		t.Fatalf("client type = %T, want *nativeClient", raw)
 	}
@@ -1361,8 +1361,8 @@ func TestWarmReadHelpersIssueSingleRedisRead(t *testing.T) {
 		if err := run(); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got := h.total.Load() - before; got != 1 {
-			t.Fatalf("%s command count = %d, want 1", name, got)
+		if got := h.total.Load() - before; got != 3 {
+			t.Fatalf("%s command count = %d, want 3 (one content read plus generation checks)", name, got)
 		}
 	}
 
@@ -2349,16 +2349,7 @@ func TestSetAttrsSingleRoundTrip(t *testing.T) {
 	const fsKey = "setattrs-rtt"
 	var hsetCount atomic.Int64
 	hook := &commandCountHook{track: func(cmd redis.Cmder) {
-		args := cmd.Args()
-		if len(args) < 2 {
-			return
-		}
-		name, _ := args[0].(string)
-		if !strings.EqualFold(name, "hset") {
-			return
-		}
-		key, _ := args[1].(string)
-		if !strings.Contains(key, ":inode:") {
+		if cmd.Name() != "eval" && cmd.Name() != "evalsha" {
 			return
 		}
 		hsetCount.Add(1)
@@ -2381,7 +2372,7 @@ func TestSetAttrsSingleRoundTrip(t *testing.T) {
 		t.Fatalf("SetAttrs: %v", err)
 	}
 	if got := hsetCount.Load(); got != 1 {
-		t.Fatalf("SetAttrs issued %d HSETs against an inode hash, want 1", got)
+		t.Fatalf("SetAttrs issued %d atomic metadata publications, want 1", got)
 	}
 }
 
@@ -2533,10 +2524,8 @@ func TestSetAttrsCommandsStrictlyLessThanLegacy(t *testing.T) {
 		t.Fatalf("SetAttrs fast path issued %d commands, legacy issued %d; "+
 			"fast path must be strictly less", batchCmds, legacyCmds)
 	}
-	// Empirically: batch=2 (HSet + PUBLISH), legacy=6 (3× HSet + 3× PUBLISH)
-	// when markRootDirty is throttled. Pin these so a regression that
-	// silently adds a round trip trips the assertion.
-	const maxBatchCmds = 3
+	// Conditional metadata publication includes generation and revision checks.
+	const maxBatchCmds = 5
 	if batchCmds > maxBatchCmds {
 		t.Fatalf("SetAttrs fast path issued %d commands, want <= %d "+
 			"(regression: extra round trip on the SETATTR hot path)",
@@ -2566,19 +2555,8 @@ func TestCreateFileCommandCountIsBounded(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Post Fix 1, an uncontended CreateFile against a warm root cache
-	// issues roughly:
-	//   INCR nextInode                                         (1)
-	//   pipeline: HSETNX dirents + SET content:{id} + HSet inode
-	//             + HSet touchtimes + HIncrBy files            (5)
-	//   PUBLISH invalidate (InvalidateOpDir for parent listing) (1)
-	//   PUBLISH invalidate (InvalidateOpInode for new file)     (1)
-	//   SET rootDirty "1"                                       (1)
-	// = 9 commands.
-	//
-	// The extra SET is for the external content key (content_ref="ext"
-	// storage model). Pre-fix the WATCH/MULTI sequence was 3+ more.
-	const maxCommands = 12
+	// Staging and conditional publication add lifetime checks and cleanup.
+	const maxCommands = 18
 	if got := h.total.Load(); got > maxCommands {
 		t.Fatalf("CreateFile issued %d Redis commands, want <= %d (regression)", got, maxCommands)
 	}

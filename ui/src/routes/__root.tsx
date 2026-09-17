@@ -123,7 +123,7 @@ function RootLayout() {
     </PublicShell>
   ) : (
     <>
-      <RouteWarmup />
+      {!auth.isLoading && !auth.isSignedOut ? <RouteWarmup /> : null}
       <FlexRow>
         <Suspense fallback={<SidebarPlaceholder aria-hidden="true" />}>
           <AppSidebar />

@@ -369,7 +369,7 @@ func TestMountSkillVolumeIgnoresExistingSameMount(t *testing.T) {
 	mountPoint := filepath.Join("tmp", "skill")
 	runner := &scriptedAFSRunner{
 		failures: map[int]error{
-			1: fail("afs vol mount --yes --session liveskills-demo skill_acme_demo %s failed: Error\n\nPath %s overlaps existing mount skill_acme_demo at %s.", mountPoint, mountPoint, mountPoint),
+			1: fail("afs ws mount --yes --session liveskills-demo skill_acme_demo %s failed: Error\n\nPath %s overlaps existing mount skill_acme_demo at %s.", mountPoint, mountPoint, mountPoint),
 		},
 	}
 	adapter := &LocalAFSAdapter{Mode: afsModeCLI, Runner: runner}
@@ -378,7 +378,7 @@ func TestMountSkillVolumeIgnoresExistingSameMount(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
-	requireAFSCall(t, runner.calls[1], "vol", "mount", "--yes", "--session")
+	requireAFSCall(t, runner.calls[1], "ws", "mount", "--yes", "--session")
 }
 
 func TestPublishThenAddIsTheHappyPath(t *testing.T) {
@@ -885,10 +885,10 @@ func TestAFSCLIAdapterImportsCheckpointsAndMountsVolumes(t *testing.T) {
 	if len(runner.calls) != 4 {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
-	requireAFSCall(t, runner.calls[0], "vol", "import", "skill_acme_demo")
+	requireAFSCall(t, runner.calls[0], "ws", "import", "skill_acme_demo")
 	requireAFSCall(t, runner.calls[1], "cp", "create", "skill_acme_demo", checkpoint, "--description", "LiveSkills 0.1.0")
 	requireAFSCall(t, runner.calls[2], "cp", "restore", "skill_acme_demo", checkpoint)
-	requireAFSCall(t, runner.calls[3], "vol", "mount", "--yes", "--session")
+	requireAFSCall(t, runner.calls[3], "ws", "mount", "--yes", "--session")
 	if runner.calls[3][len(runner.calls[3])-2] != "skill_acme_demo" || runner.calls[3][len(runner.calls[3])-1] != mountPoint {
 		t.Fatalf("unexpected mount call: %#v", runner.calls[3])
 	}
@@ -921,17 +921,17 @@ func TestAFSCLIAdapterImportsStagedCheckpointWhenVolumeIsMissing(t *testing.T) {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
 	requireAFSCall(t, runner.calls[0], "cp", "restore", "skill_acme_demo", "chk_demo")
-	requireAFSCall(t, runner.calls[1], "vol", "import", "skill_acme_demo", staged)
+	requireAFSCall(t, runner.calls[1], "ws", "import", "skill_acme_demo", staged)
 	requireAFSCall(t, runner.calls[2], "cp", "create", "skill_acme_demo", "chk_demo", "--description", "LiveSkills chk_demo")
 	requireAFSCall(t, runner.calls[3], "cp", "restore", "skill_acme_demo", "chk_demo")
-	requireAFSCall(t, runner.calls[4], "vol", "mount", "--yes", "--session")
+	requireAFSCall(t, runner.calls[4], "ws", "mount", "--yes", "--session")
 }
 
 func TestAFSCLIAdapterRetriesImportWithForceWhenVolumeExists(t *testing.T) {
 	root := t.TempDir()
 	runner := &scriptedAFSRunner{
 		failures: map[int]error{
-			0: fail("afs vol import skill_acme_demo /tmp/staged failed: volume \"skill_acme_demo\" already exists; rerun with --force to replace it"),
+			0: fail("afs ws import skill_acme_demo /tmp/staged failed: volume \"skill_acme_demo\" already exists; rerun with --force to replace it"),
 		},
 	}
 	adapter := &LocalAFSAdapter{
@@ -953,8 +953,8 @@ func TestAFSCLIAdapterRetriesImportWithForceWhenVolumeExists(t *testing.T) {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
 	staged := adapter.versionPath("skill_acme_demo", checkpoint)
-	requireAFSCall(t, runner.calls[0], "vol", "import", "skill_acme_demo", staged)
-	requireAFSCall(t, runner.calls[1], "vol", "import", "--force", "skill_acme_demo", staged)
+	requireAFSCall(t, runner.calls[0], "ws", "import", "skill_acme_demo", staged)
+	requireAFSCall(t, runner.calls[1], "ws", "import", "--force", "skill_acme_demo", staged)
 	requireAFSCall(t, runner.calls[2], "cp", "create", "skill_acme_demo", checkpoint, "--description", "LiveSkills 0.2.0")
 }
 
@@ -1062,7 +1062,7 @@ func TestLocalSkillsWorkspaceAttachesAndDetachesUnusedVolume(t *testing.T) {
 	}
 }
 
-func TestCLIWorkspaceHelpersUseAFSWorkspaceAndVolumeCalls(t *testing.T) {
+func TestCLIWorkspaceHelpersMountOnlyIndependentSkillTrees(t *testing.T) {
 	root := t.TempDir()
 	runner := &recordingAFSRunner{}
 	adapter := &LocalAFSAdapter{
@@ -1084,46 +1084,29 @@ func TestCLIWorkspaceHelpersUseAFSWorkspaceAndVolumeCalls(t *testing.T) {
 	if canonical != filepath.Join(mountPoint, "skills", "demo") {
 		t.Fatalf("unexpected canonical path: %s", canonical)
 	}
-	if len(runner.calls) != 4 {
-		t.Fatalf("unexpected calls: %#v", runner.calls)
-	}
-	requireAFSCall(t, runner.calls[0], "ws", "create", "liveskills_project_demo")
-	requireAFSCall(t, runner.calls[1], "ws", "mount", "liveskills_project_demo", mountPoint)
-	requireAFSCall(t, runner.calls[2], "vol", "mount", "--yes", "--session")
-	if runner.calls[2][len(runner.calls[2])-2] != "skill_acme_demo" || runner.calls[2][len(runner.calls[2])-1] != canonical {
-		t.Fatalf("unexpected attach call: %#v", runner.calls[2])
-	}
-	requireAFSCall(t, runner.calls[3], "vol", "unmount", canonical)
-}
-
-func TestCLIWorkspaceMountAllowsEmptyHelperWorkspace(t *testing.T) {
-	root := t.TempDir()
-	mountPoint := filepath.Join(root, "skills-workspace")
-	runner := &scriptedAFSRunner{
-		failures: map[int]error{
-			1: fail("afs ws mount liveskills_project_demo %s failed: Error\n\nWorkspace liveskills_project_demo has no attached volumes.", mountPoint),
-		},
-	}
-	adapter := &LocalAFSAdapter{
-		Home:   filepath.Join(root, "home"),
-		Root:   filepath.Join(root, "home", "afs"),
-		Mode:   afsModeCLI,
-		Runner: runner,
-	}
-
-	workspace, err := adapter.EnsureSkillsWorkspace(scopeProject, "demo")
-	must(t, err)
-	workspace, err = adapter.MountSkillsWorkspace(workspace, mountPoint)
-	must(t, err)
-
-	if workspace.Root != mountPoint {
-		t.Fatalf("unexpected workspace root: %s", workspace.Root)
-	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
-	requireAFSCall(t, runner.calls[0], "ws", "create", "liveskills_project_demo")
-	requireAFSCall(t, runner.calls[1], "ws", "mount", "liveskills_project_demo", mountPoint)
+	requireAFSCall(t, runner.calls[0], "ws", "mount", "--yes", "--session")
+	if runner.calls[0][len(runner.calls[0])-2] != "skill_acme_demo" || runner.calls[0][len(runner.calls[0])-1] != canonical {
+		t.Fatalf("unexpected mount call: %#v", runner.calls[0])
+	}
+	requireAFSCall(t, runner.calls[1], "ws", "unmount", canonical)
+
+}
+
+func TestCLIWorkspaceCollectionStaysLocal(t *testing.T) {
+	root := t.TempDir()
+	runner := &recordingAFSRunner{}
+	adapter := &LocalAFSAdapter{Home: root, Root: filepath.Join(root, "afs"), Mode: afsModeCLI, Runner: runner}
+	workspace, err := adapter.EnsureSkillsWorkspace(scopeProject, "demo")
+	must(t, err)
+	mountPoint := filepath.Join(root, "skills")
+	workspace, err = adapter.MountSkillsWorkspace(workspace, mountPoint)
+	must(t, err)
+	if workspace.Root != mountPoint || len(runner.calls) != 0 {
+		t.Fatalf("collection must remain local: %+v, calls=%v", workspace, runner.calls)
+	}
 }
 
 func TestCLIWorkspaceAttachAliasesVolumeMountedAtOtherCanonicalPath(t *testing.T) {
@@ -1139,7 +1122,7 @@ func TestCLIWorkspaceAttachAliasesVolumeMountedAtOtherCanonicalPath(t *testing.T
 	canonical := canonicalSkillPath(workspace.Root, "demo")
 	runner := &scriptedAFSRunner{
 		failures: map[int]error{
-			0: fail("afs vol mount --yes --session liveskills-ws-demo skill_acme_demo %s failed: Error\n\nWorkspace skill_acme_demo is already mounted at %s.", canonical, existingMount),
+			0: fail("afs ws mount --yes --session liveskills-ws-demo skill_acme_demo %s failed: Error\n\nWorkspace skill_acme_demo is already mounted at %s.", canonical, existingMount),
 		},
 	}
 	adapter := &LocalAFSAdapter{
@@ -1158,7 +1141,7 @@ func TestCLIWorkspaceAttachAliasesVolumeMountedAtOtherCanonicalPath(t *testing.T
 	if len(runner.calls) != 1 {
 		t.Fatalf("unexpected calls: %#v", runner.calls)
 	}
-	requireAFSCall(t, runner.calls[0], "vol", "mount", "--yes", "--session")
+	requireAFSCall(t, runner.calls[0], "ws", "mount", "--yes", "--session")
 	if !SkillSymlinkPointsTo(canonical, existingMount) {
 		t.Fatalf("expected canonical alias %s to point at %s", canonical, existingMount)
 	}

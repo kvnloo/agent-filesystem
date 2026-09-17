@@ -18,16 +18,13 @@ import {
 import { getControlPlaneURL } from "../../foundation/api/afs";
 import {
   useCreateControlPlaneTokenMutation,
-  useCreateWorkspaceCompositionAPIKeyMutation,
-  useWorkspaceComposition,
-  useWorkspaceCompositions,
+  useCreateMCPAccessTokenMutation,
+  useWorkspaceSummaries,
 } from "../../foundation/hooks/use-afs";
 import type {
   AFSMCPCapability,
   AFSMCPProfile,
   AFSMCPToken,
-  AFSMCPTokenMountCapability,
-  AFSWorkspaceCompositionMount,
 } from "../../foundation/types/afs";
 
 type Scope = "workspace" | "control-plane";
@@ -58,8 +55,8 @@ export function CreateAPIKeyDialog({
   initialWorkspaceId,
   initialScope,
 }: Props) {
-  const compositionsQuery = useWorkspaceCompositions(isOpen);
-  const createWorkspaceKey = useCreateWorkspaceCompositionAPIKeyMutation();
+  const workspacesQuery = useWorkspaceSummaries(null, isOpen);
+  const createWorkspaceKey = useCreateMCPAccessTokenMutation();
   const createControlPlaneToken = useCreateControlPlaneTokenMutation();
 
   const [scope, setScope] = useState<Scope>(initialScope ?? "workspace");
@@ -71,23 +68,13 @@ export function CreateAPIKeyDialog({
   const [copied, setCopied] = useState<string | null>(null);
   const [controlPlaneAck, setControlPlaneAck] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  // Per-mount overrides; key = volumeId. Empty means "inherit from `capability`
-  // (or 'read' when the mount is manifest-readonly)".
-  const [mountOverrides, setMountOverrides] = useState<Record<string, UnifiedCapability>>({});
-
-  const compositions = useMemo(
+  const workspaces = useMemo(
     () =>
-      (compositionsQuery.data ?? [])
+      (workspacesQuery.data ?? [])
         .slice()
         .sort((left, right) => left.name.localeCompare(right.name)),
-    [compositionsQuery.data],
+    [workspacesQuery.data],
   );
-  const compositionDetailQuery = useWorkspaceComposition(
-    workspaceId,
-    isOpen && scope === "workspace" && workspaceId !== "",
-  );
-  const mounts: AFSWorkspaceCompositionMount[] =
-    compositionDetailQuery.data?.mounts ?? [];
 
   useEffect(() => {
     if (!isOpen) return;
@@ -97,26 +84,15 @@ export function CreateAPIKeyDialog({
     setCapability("read-write");
     setExpiry("7d");
     setControlPlaneAck(false);
-    setMountOverrides({});
     setScope(initialScope ?? "workspace");
-    const fallback = compositions[0]?.id ?? "";
-    const match = compositions.find(
-      (composition) => composition.id === initialWorkspaceId,
+    const fallback = workspaces[0]?.id ?? "";
+    const match = workspaces.find(
+      (workspace) => workspace.id === initialWorkspaceId,
     )?.id;
     setWorkspaceId(match ?? fallback);
-  }, [isOpen, initialScope, initialWorkspaceId, compositions]);
+  }, [isOpen, initialScope, initialWorkspaceId, workspaces]);
 
-  // Reset per-mount overrides when the workspace changes so we don't carry
-  // stale volume ids from the previous composition.
-  useEffect(() => {
-    setMountOverrides({});
-  }, [workspaceId]);
-
-  const selected = compositions.find((c) => c.id === workspaceId) ?? null;
-  const effectiveMountCap = (mount: AFSWorkspaceCompositionMount): UnifiedCapability =>
-    mount.readonly
-      ? "read"
-      : (mountOverrides[mount.volumeId] ?? capability);
+  const selected = workspaces.find((c) => c.id === workspaceId) ?? null;
   const pending =
     createWorkspaceKey.isPending || createControlPlaneToken.isPending;
 
@@ -145,18 +121,12 @@ export function CreateAPIKeyDialog({
       }
       if (selected == null) return;
       const mcpCapability = unifiedToMCP(capability);
-      const mountCapabilities: AFSMCPTokenMountCapability[] = mounts.map(
-        (mount) => ({
-          volumeId: mount.volumeId,
-          capability: unifiedToMCP(effectiveMountCap(mount)),
-        }),
-      );
       const token = await createWorkspaceKey.mutateAsync({
         workspaceId: selected.id,
         name: name.trim() || undefined,
         profile: profileForCapability(mcpCapability),
         capability: mcpCapability,
-        mountCapabilities,
+        databaseId: selected.databaseId,
         expiresAt: expiryValueToTimestamp(expiry),
       });
       setCreatedKey({
@@ -224,7 +194,7 @@ export function CreateAPIKeyDialog({
             <DialogBody>
               {createdKey
                 ? "Copy the key below. It's shown once — store it safely."
-                : "Pick what this key reaches: one Agent Workspace, or your whole account."}
+                : "Pick what this key reaches: one Workspace, or your whole account."}
             </DialogBody>
           </div>
           <DialogCloseButton onClick={handleClose}>&times;</DialogCloseButton>
@@ -300,7 +270,7 @@ export function CreateAPIKeyDialog({
                   <OptionLabel>
                     <OptionName>Workspace</OptionName>
                     <OptionHint>
-                      Bound to one Agent Workspace — same key works for MCP
+                      Bound to one Workspace — same key works for MCP
                       clients and the CLI.
                     </OptionHint>
                   </OptionLabel>
@@ -324,19 +294,19 @@ export function CreateAPIKeyDialog({
 
             {scope === "workspace" ? (
               <Field>
-                Agent Workspace
+                Workspace
                 <Select
                   options={
-                    compositions.length === 0
-                      ? [{ value: "", label: "No Agent Workspaces yet" }]
-                      : compositions.map((composition) => ({
-                          value: composition.id,
-                          label: composition.name,
+                    workspaces.length === 0
+                      ? [{ value: "", label: "No Workspaces yet" }]
+                      : workspaces.map((workspace) => ({
+                          value: workspace.id,
+                          label: workspace.databaseName ? `${workspace.name} · ${workspace.databaseName}` : workspace.name,
                         }))
                   }
                   value={workspaceId}
                   onChange={(next) => setWorkspaceId(next)}
-                  disabled={compositions.length === 0}
+                  disabled={workspaces.length === 0}
                 />
               </Field>
             ) : null}
@@ -355,65 +325,6 @@ export function CreateAPIKeyDialog({
             </Field>
 
             {scope === "workspace" ? (
-              mounts.length > 0 ? (
-                <FieldGroup>
-                  <FieldLabel>Per-volume access</FieldLabel>
-                  <MountList>
-                    {mounts.map((mount) => {
-                      const cap = effectiveMountCap(mount);
-                      const lockedReadonly = mount.readonly;
-                      return (
-                        <MountRow key={mount.volumeId}>
-                          <MountInfo>
-                            <MountPath>
-                              {mount.mountPath || "/"}
-                            </MountPath>
-                            <MountVolume>
-                              {mount.volumeName ?? mount.volumeId}
-                              {lockedReadonly ? " · manifest readonly" : ""}
-                            </MountVolume>
-                          </MountInfo>
-                          <MountSelect>
-                            <Select
-                              aria-label={`Capability for ${
-                                mount.volumeName ?? mount.volumeId
-                              }`}
-                              options={
-                                lockedReadonly
-                                  ? [{ value: "read", label: "Read" }]
-                                  : [
-                                      { value: "read", label: "Read" },
-                                      {
-                                        value: "read-write",
-                                        label: "Read + write",
-                                      },
-                                      {
-                                        value: "read-write-checkpoints",
-                                        label: "Read + write + checkpoints",
-                                      },
-                                    ]
-                              }
-                              value={cap}
-                              onChange={(next) =>
-                                setMountOverrides((prev) => ({
-                                  ...prev,
-                                  [mount.volumeId]: next as UnifiedCapability,
-                                }))
-                              }
-                              disabled={lockedReadonly}
-                            />
-                          </MountSelect>
-                        </MountRow>
-                      );
-                    })}
-                  </MountList>
-                  <MountHint>
-                    Each mount carries its own permission on this key. The
-                    workspace manifest is the upper bound — readonly mounts
-                    stay readonly.
-                  </MountHint>
-                </FieldGroup>
-              ) : (
                 <Field>
                   Capability
                   <Select
@@ -431,7 +342,6 @@ export function CreateAPIKeyDialog({
                     }
                   />
                 </Field>
-              )
             ) : null}
 
             <Field>
@@ -473,6 +383,7 @@ export function CreateAPIKeyDialog({
               </ControlPlaneNotice>
             ) : null}
 
+            {workspacesQuery.isError ? <DialogError role="alert">Unable to load workspaces. Try again after the connection recovers.</DialogError> : null}
             {formError ? <DialogError role="alert">{formError}</DialogError> : null}
 
             <DialogActions style={{ justifyContent: "flex-end" }}>
@@ -746,62 +657,6 @@ const OptionHint = styled.div`
   color: var(--afs-muted);
   font-size: 12px;
   line-height: 1.45;
-`;
-
-const MountList = styled.div`
-  display: grid;
-  gap: 8px;
-  border: 1px solid var(--afs-line);
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: var(--afs-panel);
-`;
-
-const MountRow = styled.div`
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 14px;
-  padding: 6px 4px;
-  border-radius: 8px;
-
-  & + & {
-    border-top: 1px dashed var(--afs-line);
-    padding-top: 12px;
-  }
-`;
-
-const MountInfo = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-`;
-
-const MountPath = styled.div`
-  color: var(--afs-ink);
-  font-family: var(--afs-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 13px;
-  font-weight: 600;
-`;
-
-const MountVolume = styled.div`
-  color: var(--afs-muted);
-  font-size: 11.5px;
-`;
-
-const MountSelect = styled.div`
-  min-width: 220px;
-
-  > * {
-    width: 100%;
-  }
-`;
-
-const MountHint = styled.div`
-  color: var(--afs-muted);
-  font-size: 12px;
-  line-height: 1.5;
 `;
 
 const ControlPlaneNotice = styled.div`

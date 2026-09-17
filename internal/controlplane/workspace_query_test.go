@@ -71,7 +71,7 @@ func TestQueryIndexStatusDrainsPendingWork(t *testing.T) {
 		t.Fatalf("PutSavepoint() returned error: %v", err)
 	}
 
-	if _, _, _, err := EnsureWorkspaceRoot(ctx, store, "repo"); err != nil {
+	if err := SyncWorkspaceRoot(ctx, store, "repo", manifestValue); err != nil {
 		t.Fatalf("EnsureWorkspaceRoot() returned error: %v", err)
 	}
 	before, err := queryindex.Inspect(ctx, rdb, WorkspaceFSKey("repo"), "/")
@@ -166,7 +166,7 @@ func TestRebuildQueryIndexCanCreateSemanticEmbeddings(t *testing.T) {
 	}, manifestValue); err != nil {
 		t.Fatalf("PutSavepoint() returned error: %v", err)
 	}
-	if _, _, _, err := EnsureWorkspaceRoot(ctx, store, "repo"); err != nil {
+	if err := SyncWorkspaceRoot(ctx, store, "repo", manifestValue); err != nil {
 		t.Fatalf("EnsureWorkspaceRoot() returned error: %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestCleanQueryIndexResetsGeneratedData(t *testing.T) {
 		t.Fatalf("PutSavepoint() returned error: %v", err)
 	}
 
-	if _, _, _, err := EnsureWorkspaceRoot(ctx, store, "repo"); err != nil {
+	if err := SyncWorkspaceRoot(ctx, store, "repo", manifestValue); err != nil {
 		t.Fatalf("EnsureWorkspaceRoot() returned error: %v", err)
 	}
 	before, err := service.QueryIndexStatus(ctx, "repo", WorkspaceQueryIndexStatusRequest{Path: "/"})

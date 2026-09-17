@@ -100,10 +100,10 @@ def _fake_entries(files, symlinks, path):
 class AsyncClientsTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_removes_file_and_calls_file_delete(self):
         fake = FakeAsyncMCP()
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="foobar", token="token", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="foobar", token="token", client=fake))
 
         await fs.write_file("/src/README.md", "hello")
-        result = await fs.delete("/foobar/src/README.md")
+        result = await fs.delete("/src/README.md")
 
         self.assertEqual(result, {"operation": "delete", "kind": "file"})
         self.assertNotIn("/src/README.md", fake.files)
@@ -240,46 +240,21 @@ class AsyncTransportTest(unittest.IsolatedAsyncioTestCase):
 class AsyncMountedFSTest(unittest.IsolatedAsyncioTestCase):
     async def test_single_workspace_paths_are_workspace_relative(self):
         fake = FakeAsyncMCP()
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="foobar", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="foobar", token="t", client=fake))
         await fs.write_file("/src/README.md", "hello")
         self.assertEqual(fake.files["/src/README.md"], "hello")
-        self.assertEqual(await fs.read_file("/foobar/src/README.md"), "hello")
-        self.assertEqual(fs.workspace_names, ["foobar"])
+        self.assertEqual(await fs.read_file("/src/README.md"), "hello")
+        self.assertEqual(fs.workspace_name, "foobar")
 
-    async def test_multi_workspace_requires_prefix(self):
-        fs = AsyncMountedFS(
-            [
-                _AsyncMountedWorkspace(name="api", token="t", client=FakeAsyncMCP()),
-                _AsyncMountedWorkspace(name="web", token="t", client=FakeAsyncMCP()),
-            ]
-        )
+    async def test_rejects_multiple_workspace_mounts(self):
         with self.assertRaises(AFSError):
-            await fs.write_file("/README.md", "hello")
+            AsyncMountedFS([_AsyncMountedWorkspace(name="a", token="t", client=FakeAsyncMCP()), _AsyncMountedWorkspace(name="b", token="t", client=FakeAsyncMCP())])
 
-
-class MountTableTest(unittest.TestCase):
-    def test_single_workspace_fallback(self):
-        from redis_afs._paths import MountTable
-
-        table = MountTable(["only"])
-        self.assertEqual(table.resolve("/src/app.py"), ("only", "/src/app.py"))
-
-    def test_exact_prefix_match(self):
-        from redis_afs._paths import MountTable
-
-        table = MountTable(["api", "web"])
-        self.assertEqual(table.resolve("/api"), ("api", "/"))
-        self.assertEqual(table.resolve("/web/index.html"), ("web", "/index.html"))
-
-    def test_multi_workspace_requires_prefix(self):
-        from redis_afs._paths import MountTable
-
-        table = MountTable(["api", "web"])
-        with self.assertRaises(AFSError) as ctx:
-            table.resolve("/README.md")
-        self.assertIn("must start with one of", str(ctx.exception))
-        self.assertIn("/api", str(ctx.exception))
-        self.assertIn("/web", str(ctx.exception))
+    async def test_workspace_name_is_a_real_directory_name(self):
+        fake = FakeAsyncMCP()
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
+        await fs.write_file("/repo/file.txt", "nested")
+        self.assertEqual(fake.files["/repo/file.txt"], "nested")
 
 
 class FakeAsyncControlPlane:
@@ -333,60 +308,35 @@ class AsyncFSMountTest(unittest.IsolatedAsyncioTestCase):
 
         with patch("redis_afs.aio._resources.AsyncMCPHttpClient", FakeAsyncMountedClient):
             fs = await AsyncFSClient(control_plane).mount(
-                workspaces=[{"name": "repo"}], mode="rw", token_name="Mounted FS"
+                workspace="repo", mode="rw", token_name="Mounted FS"
             )
             try:
-                await fs.write_file("/repo/README.md", "hello from mounted fs")
-                self.assertEqual(await fs.read_file("/repo/README.md"), "hello from mounted fs")
-                self.assertEqual(fs.workspace_names, ["repo"])
+                await fs.write_file("/README.md", "hello from mounted fs")
+                self.assertEqual(await fs.read_file("/README.md"), "hello from mounted fs")
+                self.assertEqual(fs.workspace_name, "repo")
                 self.assertEqual(control_plane.issued[0]["arguments"]["workspace"], "repo")
                 self.assertEqual(control_plane.issued[0]["arguments"]["profile"], "workspace-rw")
                 self.assertEqual(control_plane.issued[0]["arguments"]["name"], "Mounted FS")
-                child = fs._workspaces[0].client
+                child = fs._workspace.client
                 self.assertFalse(child.closed)
             finally:
                 await fs.aclose()
             self.assertTrue(child.closed)
 
-    async def test_mount_issues_distinct_tokens_per_workspace(self):
-        control_plane = FakeAsyncControlPlane()
-        FakeAsyncMountedClient.files_by_token = {}
-
-        with patch("redis_afs.aio._resources.AsyncMCPHttpClient", FakeAsyncMountedClient):
-            fs = await AsyncFSClient(control_plane).mount(workspaces=[{"name": "api"}, {"name": "web"}], mode="rw")
-            try:
-                self.assertEqual(fs.workspace_names, ["api", "web"])
-                self.assertEqual(len(control_plane.issued), 2)
-                self.assertEqual(control_plane.issued[0]["arguments"]["workspace"], "api")
-                self.assertEqual(control_plane.issued[1]["arguments"]["workspace"], "web")
-            finally:
-                await fs.aclose()
-
-    async def test_mount_issues_all_tokens_concurrently(self):
-        control_plane = FakeAsyncControlPlane()
-        FakeAsyncMountedClient.files_by_token = {}
-
-        with patch("redis_afs.aio._resources.AsyncMCPHttpClient", FakeAsyncMountedClient):
-            fs = await AsyncFSClient(control_plane).mount(
-                workspaces=[{"name": "api"}, {"name": "web"}, {"name": "db"}], mode="rw"
-            )
-            try:
-                self.assertEqual(len(control_plane.issued), 3)
-                # mounted ordering is deterministic, matching the input refs.
-                self.assertEqual(fs.workspace_names, ["api", "web", "db"])
-            finally:
-                await fs.aclose()
-
-    async def test_mount_requires_at_least_one_workspace(self):
+    async def test_mount_requires_a_workspace(self):
         with self.assertRaises(AFSError):
-            await AsyncFSClient(FakeAsyncControlPlane()).mount(workspaces=[])
+            await AsyncFSClient(FakeAsyncControlPlane()).mount(workspace="")
+
+    async def test_removed_multi_workspace_input_is_rejected(self):
+        with self.assertRaises(TypeError):
+            await AsyncFSClient(FakeAsyncControlPlane()).mount(workspaces=[{"name": "api"}, {"name": "web"}])
 
     async def test_mount_forwards_concurrency(self):
         control_plane = FakeAsyncControlPlane()
         FakeAsyncMountedClient.files_by_token = {}
 
         with patch("redis_afs.aio._resources.AsyncMCPHttpClient", FakeAsyncMountedClient):
-            fs = await AsyncFSClient(control_plane).mount(workspaces=[{"name": "repo"}], concurrency=3)
+            fs = await AsyncFSClient(control_plane).mount(workspace="repo", concurrency=3)
             try:
                 self.assertEqual(fs._concurrency, 3)
             finally:
@@ -397,19 +347,19 @@ class AsyncSyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_round_trip_materializes_files(self):
         fake = FakeAsyncMCP()
         fake.files["/README.md"] = "hello"
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
         root = await fs.sync_from_remote()
-        self.assertEqual(Path(root, "repo", "README.md").read_text(), "hello")
+        self.assertEqual(Path(root, "README.md").read_text(), "hello")
 
     async def test_sync_to_remote_skips_symlinks(self):
         fake = FakeAsyncMCP()
         fake.files["/README.md"] = "hello"
         fake.symlinks["/link.md"] = "README.md"
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
         root = await fs.sync_from_remote()
-        self.assertTrue(Path(root, "repo", "link.md").is_symlink())
+        self.assertTrue(Path(root, "link.md").is_symlink())
         await fs.sync_to_remote()
         writes = [a["path"] for n, a in fake.calls if n == "file_write"]
         self.assertNotIn("/link.md", writes)
@@ -442,7 +392,7 @@ class AsyncSyncConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         for i in range(8):
             fake.files[f"/file{i}.txt"] = f"content-{i}"
         fs = AsyncMountedFS(
-            [_AsyncMountedWorkspace(name="repo", token="t", client=fake)],
+            _AsyncMountedWorkspace(name="repo", token="t", client=fake),
             concurrency=3,
         )
         self.addAsyncCleanup(fs.aclose)
@@ -455,16 +405,16 @@ class AsyncBashTest(unittest.IsolatedAsyncioTestCase):
     async def test_exec_runs_command_and_syncs(self):
         fake = FakeAsyncMCP()
         fake.files["/hello.txt"] = "hi"
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
-        result = await fs.bash().exec("cat /repo/hello.txt")
+        result = await fs.bash().exec("cat hello.txt")
         self.assertIsInstance(result, BashResult)
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "hi")
 
     async def test_exec_check_raises_on_nonzero(self):
         fake = FakeAsyncMCP()
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
         # Without check=True, a non-zero exit is returned, not raised.
         result = await fs.bash().exec("exit 3")
@@ -477,7 +427,7 @@ class AsyncBashTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_exec_env_override(self):
         fake = FakeAsyncMCP()
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
         result = await fs.bash().exec("echo $FOO", env={"FOO": "bar"})
         self.assertEqual(result.exit_code, 0)
@@ -490,7 +440,7 @@ class AsyncBashTest(unittest.IsolatedAsyncioTestCase):
         import asyncio
 
         fake = FakeAsyncMCP()
-        fs = AsyncMountedFS([_AsyncMountedWorkspace(name="repo", token="t", client=fake)])
+        fs = AsyncMountedFS(_AsyncMountedWorkspace(name="repo", token="t", client=fake))
         self.addAsyncCleanup(fs.aclose)
         with self.assertRaises(asyncio.TimeoutError):
             await fs.bash().exec("sleep 5", timeout=0.2)

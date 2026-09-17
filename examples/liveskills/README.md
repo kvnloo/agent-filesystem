@@ -98,13 +98,13 @@ agent folders must remain untouched.
 `afs.go` and `workspace_mount.go` contain the AFS adapter boundary. In local
 mode, the adapter materializes checkpoint files and writes mount metadata under
 `$LIVESKILLS_HOME`. In CLI mode, it calls `afs` to create/import checkpoints and
-mount skill volumes into the canonical skills workspace.
+mount each skill workspace into a local collection directory.
 
 The current shape is:
 
-- one skills workspace per scope
-- registered skill content under `skills/<skill-slug>` in that workspace
-- direct per-skill volume attachment at the canonical skill path
+- one local skills collection per scope
+- registered skill content under `skills/<skill-slug>` in that collection
+- one independent AFS workspace mounted at each canonical skill path
 - symlinked agent folders by default
 - copy fallback with `--copy`
 

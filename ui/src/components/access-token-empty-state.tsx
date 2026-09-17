@@ -87,7 +87,7 @@ export function AccessTokenEmptyState({ onCreateToken, onCreateLocalToken }: Pro
           </BenefitIcon>
           <BenefitTitle>Scoped by key</BenefitTitle>
           <BenefitBody>
-            Each key is bound to one volume — or scoped to control plane
+            Each key is bound to one workspace — or scoped to control plane
             for admins. Agents only reach what you explicitly grant.
           </BenefitBody>
         </Benefit>

@@ -28,7 +28,7 @@ func volumeScope(volumeID string) string {
 	return mcpScopeVolumePrefix + strings.TrimSpace(volumeID)
 }
 
-// workspaceScope builds the legacy scope string for older workspace-bound tokens.
+// workspaceScope binds a credential to one independent tree by stable ID.
 func workspaceScope(workspaceID string) string {
 	return mcpScopeWorkspacePrefix + strings.TrimSpace(workspaceID)
 }
@@ -42,10 +42,8 @@ func isControlPlaneScope(scope string) bool {
 	return strings.TrimSpace(scope) == mcpScopeControlPlane
 }
 
-// mcpAccessTokenMountCapability declares the capability granted by a workspace
-// API key for a single mount in the bound Agent Workspace composition. The
-// presence of a mount in this list is what grants access; if a composition
-// later adds a new mount, existing keys don't see it.
+// mcpAccessTokenMountCapability is retained solely to read old catalog records
+// and report their restrictions during migration. Such credentials fail closed.
 type mcpAccessTokenMountCapability struct {
 	VolumeID   string `json:"volume_id"`
 	Capability string `json:"capability"`
@@ -154,115 +152,6 @@ func (m *DatabaseManager) CreateMCPAccessToken(ctx context.Context, databaseID, 
 	return m.createMCPAccessTokenRecord(ctx, subject, label, profile.ID, route.WorkspaceID, route.Name, input)
 }
 
-// CreateResolvedWorkspaceCompositionAPIKey mints an MCP token scoped to an
-// Agent Workspace composition. The token's scope is `workspace:<compositionId>`
-// and works for both the MCP server and the CLI HTTP API. Per-mount
-// capabilities are validated against the composition manifest: every
-// MountCapability must reference a volume that's currently mounted in the
-// composition. If MountCapabilities is empty the manager populates it from the
-// composition's manifest using the top-level Capability as the default (and
-// `ro` for any mount already flagged readonly).
-func (m *DatabaseManager) CreateResolvedWorkspaceCompositionAPIKey(ctx context.Context, workspace string, input createMCPAccessTokenRequest) (mcpAccessTokenResponse, error) {
-	if m == nil || m.catalog == nil {
-		return mcpAccessTokenResponse{}, fmt.Errorf("mcp token storage is unavailable")
-	}
-	subject, label, err := m.requireOwnedSubject(ctx)
-	if err != nil {
-		return mcpAccessTokenResponse{}, err
-	}
-	_, profile, route, err := m.resolveWorkspaceComposition(ctx, workspace)
-	if err != nil {
-		return mcpAccessTokenResponse{}, err
-	}
-	if !databaseProfileVisibleToSubject(profile, subject) {
-		return mcpAccessTokenResponse{}, os.ErrNotExist
-	}
-	composition, err := m.GetResolvedWorkspaceComposition(ctx, route.ID)
-	if err != nil {
-		return mcpAccessTokenResponse{}, err
-	}
-	mountCaps, err := normalizeWorkspaceKeyMountCapabilities(composition.Mounts, input.MountCapabilities, strings.TrimSpace(input.Capability))
-	if err != nil {
-		return mcpAccessTokenResponse{}, err
-	}
-	input.MountCapabilities = mountCaps
-	// Always scope to the composition id. Caller-supplied scope is ignored
-	// for safety so callers can't mint cross-composition keys via the
-	// composition-scoped endpoint.
-	input.Scope = workspaceScope(route.ID)
-	return m.createMCPAccessTokenRecord(ctx, subject, label, profile.ID, route.ID, route.Name, input)
-}
-
-// normalizeWorkspaceKeyMountCapabilities validates per-mount caps against the
-// composition manifest. Every supplied cap must match a current mount.
-// Missing mounts inherit defaultCapability ("ro" for manifest-readonly mounts,
-// otherwise defaultCapability, then `rw` if defaultCapability is empty).
-func normalizeWorkspaceKeyMountCapabilities(mounts []workspaceCompositionMount, supplied []mcpAccessTokenMountCapability, defaultCapability string) ([]mcpAccessTokenMountCapability, error) {
-	mountByVolume := make(map[string]workspaceCompositionMount, len(mounts))
-	for _, mount := range mounts {
-		mountByVolume[mount.VolumeID] = mount
-	}
-	provided := make(map[string]string, len(supplied))
-	for _, mc := range supplied {
-		id := strings.TrimSpace(mc.VolumeID)
-		if id == "" {
-			return nil, fmt.Errorf("mount_capabilities[*].volume_id is required")
-		}
-		mount, ok := mountByVolume[id]
-		if !ok {
-			return nil, fmt.Errorf("volume %q is not mounted in this workspace", id)
-		}
-		cap, err := NormalizeMCPCapability(strings.TrimSpace(mc.Capability))
-		if err != nil {
-			return nil, fmt.Errorf("mount %s: %w", mount.VolumeID, err)
-		}
-		// A readonly mount can't be upgraded to rw by the key — the manifest
-		// is the upper bound.
-		if mount.Readonly && cap != MCPCapabilityRO {
-			return nil, fmt.Errorf("mount %s is readonly in the manifest; capability must be `ro`", mount.VolumeID)
-		}
-		provided[id] = cap
-	}
-	defaultCap := strings.TrimSpace(defaultCapability)
-	if defaultCap == "" {
-		defaultCap = MCPCapabilityRW
-	}
-	normalized := make([]mcpAccessTokenMountCapability, 0, len(mounts))
-	for _, mount := range mounts {
-		cap, ok := provided[mount.VolumeID]
-		if !ok {
-			if mount.Readonly {
-				cap = MCPCapabilityRO
-			} else {
-				if _, err := NormalizeMCPCapability(defaultCap); err == nil {
-					cap = defaultCap
-				} else {
-					cap = MCPCapabilityRW
-				}
-			}
-		}
-		normalized = append(normalized, mcpAccessTokenMountCapability{
-			VolumeID:   mount.VolumeID,
-			Capability: cap,
-		})
-	}
-	return normalized, nil
-}
-
-func (m *DatabaseManager) claimSharedWorkspaceForSubject(ctx context.Context, profile databaseProfile, route workspaceCatalogRoute) (workspaceCatalogRoute, error) {
-	if strings.TrimSpace(profile.OwnerSubject) != "" || strings.TrimSpace(route.OwnerSubject) != "" || authSubjectFromContext(ctx) == "" {
-		return route, nil
-	}
-	detail, err := m.GetWorkspace(ctx, profile.ID, route.WorkspaceID)
-	if err != nil {
-		return workspaceCatalogRoute{}, err
-	}
-	route.WorkspaceID = detail.ID
-	route.Name = detail.Name
-	route.OwnerSubject = detail.OwnerSubject
-	return route, nil
-}
-
 func (m *DatabaseManager) createMCPAccessTokenRecord(ctx context.Context, subject, label, databaseID, workspaceID, workspaceName string, input createMCPAccessTokenRequest) (mcpAccessTokenResponse, error) {
 	tokenID, secret, err := newMCPAccessTokenParts()
 	if err != nil {
@@ -273,9 +162,14 @@ func (m *DatabaseManager) createMCPAccessTokenRecord(ctx context.Context, subjec
 	if profileInput == "" && input.Readonly {
 		profileInput = MCPProfileWorkspaceRO
 	}
-	scope := strings.TrimSpace(input.Scope)
-	if scope == "" {
-		scope = volumeScope(workspaceID)
+	// A workspace endpoint can only mint a key for that exact tree. Legacy
+	// per-attachment restrictions require explicit reissue, never expansion.
+	if len(input.MountCapabilities) != 0 {
+		return mcpAccessTokenResponse{}, fmt.Errorf("mount_capabilities is retired; issue a key for one workspace")
+	}
+	scope := workspaceScope(workspaceID)
+	if input.Scope != "" && input.Scope != scope && input.Scope != volumeScope(workspaceID) {
+		return mcpAccessTokenResponse{}, fmt.Errorf("scope must match the workspace")
 	}
 	capabilityInput := strings.TrimSpace(input.Capability)
 	if capabilityInput == "" && profileInput != "" {
@@ -296,6 +190,12 @@ func (m *DatabaseManager) createMCPAccessTokenRecord(ctx context.Context, subjec
 		if strings.TrimSpace(input.Capability) == "" {
 			capability = MCPCapabilityFromProfile(profile)
 		}
+	}
+	if input.Readonly && !MCPProfileIsReadonly(profile) {
+		return mcpAccessTokenResponse{}, fmt.Errorf("readonly cannot be combined with a writable profile or capability")
+	}
+	if input.Profile != "" && input.Capability != "" && MCPCapabilityFromProfile(profile) != capability {
+		return mcpAccessTokenResponse{}, fmt.Errorf("profile and capability must grant the same permissions")
 	}
 	record := mcpAccessTokenRecord{
 		ID:                tokenID,
@@ -576,6 +476,21 @@ func (m *DatabaseManager) AuthenticateMCPAccessToken(ctx context.Context, rawTok
 			return mcpAccessTokenRecord{}, ErrMCPAccessTokenInvalid
 		}
 	}
+	scope := strings.TrimSpace(record.Scope)
+	if isControlPlaneScope(scope) {
+		// Old tree-token issuance accepted caller scopes. A bound tree record
+		// must never be upgraded to an unrestricted control-plane credential.
+		if record.WorkspaceID != "" || record.DatabaseID != "" || len(record.MountCapabilities) != 0 {
+			return mcpAccessTokenRecord{}, ErrMCPAccessTokenInvalid
+		}
+	} else {
+		if scope != "" && scope != workspaceScope(record.WorkspaceID) && scope != volumeScope(record.WorkspaceID) {
+			return mcpAccessTokenRecord{}, ErrMCPAccessTokenInvalid
+		}
+		if len(record.MountCapabilities) != 0 || !m.tokenBindsTree(ctx, record.DatabaseID, record.WorkspaceID) {
+			return mcpAccessTokenRecord{}, ErrMCPAccessTokenInvalid
+		}
+	}
 	if err := m.catalog.TouchMCPAccessToken(ctx, tokenID, now.Format(timeRFC3339)); err != nil {
 		return mcpAccessTokenRecord{}, err
 	}
@@ -685,4 +600,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (m *DatabaseManager) claimSharedWorkspaceForSubject(ctx context.Context, profile databaseProfile, route workspaceCatalogRoute) (workspaceCatalogRoute, error) {
+	if strings.TrimSpace(profile.OwnerSubject) != "" || strings.TrimSpace(route.OwnerSubject) != "" || authSubjectFromContext(ctx) == "" {
+		return route, nil
+	}
+	detail, err := m.GetWorkspace(ctx, profile.ID, route.WorkspaceID)
+	if err != nil {
+		return workspaceCatalogRoute{}, err
+	}
+	route.WorkspaceID = detail.ID
+	route.Name = detail.Name
+	route.OwnerSubject = detail.OwnerSubject
+	return route, nil
 }

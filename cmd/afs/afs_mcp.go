@@ -93,23 +93,18 @@ func cmdMCP(args []string) error {
 	profileFlag := ""
 	for i := 1; i < len(args); i++ {
 		switch {
-		case args[i] == "--workspace" || args[i] == "--volume":
+		case args[i] == "--workspace":
 			if i+1 >= len(args) {
 				return fmt.Errorf("missing value for %s\n\n%s", args[i], mcpUsageText(bin))
 			}
 			if workspaceFlag != "" {
-				return fmt.Errorf("only one of --volume or --workspace may be provided\n\n%s", mcpUsageText(bin))
+				return fmt.Errorf("--workspace may only be provided once\n\n%s", mcpUsageText(bin))
 			}
 			workspaceFlag = strings.TrimSpace(args[i+1])
 			i++
-		case strings.HasPrefix(args[i], "--volume="):
-			if workspaceFlag != "" {
-				return fmt.Errorf("only one of --volume or --workspace may be provided\n\n%s", mcpUsageText(bin))
-			}
-			workspaceFlag = strings.TrimSpace(strings.TrimPrefix(args[i], "--volume="))
 		case strings.HasPrefix(args[i], "--workspace="):
 			if workspaceFlag != "" {
-				return fmt.Errorf("only one of --volume or --workspace may be provided\n\n%s", mcpUsageText(bin))
+				return fmt.Errorf("--workspace may only be provided once\n\n%s", mcpUsageText(bin))
 			}
 			workspaceFlag = strings.TrimSpace(strings.TrimPrefix(args[i], "--workspace="))
 		case args[i] == "--profile":
@@ -152,7 +147,7 @@ func cmdMCP(args []string) error {
 
 func mcpUsageText(bin string) string {
 	return brandHeaderString() + fmt.Sprintf(`Usage:
-  %s mcp [--volume <name>] [--profile <profile>]
+  %s mcp [--workspace <name>] [--profile <profile>]
 
 Start the Agent Filesystem MCP server over stdio.
 
@@ -169,7 +164,7 @@ This command is meant to be launched by an MCP client, for example:
     "mcpServers": {
         "afs": {
         "command": "/absolute/path/to/%s",
-        "args": ["mcp", "--volume", "my-volume", "--profile", "workspace-rw"]
+        "args": ["mcp", "--workspace", "my-workspace", "--profile", "workspace-rw"]
       }
     }
   }
@@ -1990,6 +1985,11 @@ func (s *afsMCPServer) mutateWorkspaceFile(ctx context.Context, args map[string]
 }
 
 func (s *afsMCPServer) refreshWorkspaceLiveState(ctx context.Context, workspace string) (bool, error) {
+	if dirty, known, err := s.store.workspaceRootDirtyState(ctx, workspace); err != nil {
+		return false, err
+	} else if known {
+		return dirty, nil
+	}
 	meta, err := s.store.getWorkspaceMeta(ctx, workspace)
 	if err != nil {
 		return false, err
@@ -1998,21 +1998,9 @@ func (s *afsMCPServer) refreshWorkspaceLiveState(ctx context.Context, workspace 
 	if err != nil {
 		return false, err
 	}
-	dirty, err := workspaceManifestIsDirty(ctx, s.store, workspace, meta.HeadSavepoint, liveManifest)
-	if err != nil {
-		return false, err
-	}
-	if dirty {
-		if err := s.store.markWorkspaceRootDirty(ctx, workspace); err != nil {
-			return false, err
-		}
-	} else {
-		if err := s.store.markWorkspaceRootClean(ctx, workspace, meta.HeadSavepoint); err != nil {
-			return false, err
-		}
-	}
-	meta.DirtyHint = dirty
-	return dirty, s.store.putWorkspaceMeta(ctx, meta)
+	// A read-time comparison cannot acknowledge concurrent peer edits. Only a
+	// checkpoint captured from the live root may update the clean marker.
+	return workspaceManifestIsDirty(ctx, s.store, workspace, meta.HeadSavepoint, liveManifest)
 }
 
 func ensureWorkspaceParentDirs(ctx context.Context, fsClient client.Client, normalizedPath string) error {

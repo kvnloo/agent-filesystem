@@ -13,7 +13,7 @@ import (
 )
 
 // cmdSetup walks the user through the local runtime mode. Workspace selection
-// and local directories belong to `afs vol mount`. It deliberately does not
+// and local directories belong to `afs ws mount`. It deliberately does not
 // start services.
 func cmdSetup() error {
 	if st, err := loadState(); err == nil {
@@ -64,7 +64,7 @@ func cmdSetup() error {
 		return err
 	}
 	fmt.Printf("  %s Saved to %s\n", clr(ansiDim, "▸"), clr(ansiBold, compactDisplayPath(configPath())))
-	fmt.Printf("  %s Run %s to mount a volume\n\n", clr(ansiDim, "▸"), clr(ansiOrange, filepath.Base(os.Args[0])+" vol mount"))
+	fmt.Printf("  %s Run %s to mount a workspace\n\n", clr(ansiDim, "▸"), clr(ansiOrange, filepath.Base(os.Args[0])+" ws mount"))
 	return nil
 }
 

@@ -19,6 +19,7 @@ import type {
   APIKey,
   CreateSavepointInput,
   CreateWorkspaceInput,
+  ForkWorkspaceInput,
   DiffFileVersionsInput,
   GetFileHistoryInput,
   GetFileVersionContentInput,
@@ -43,12 +44,6 @@ import type {
   CreateMCPTokenInput,
   CreateCLIAccessTokenInput,
   CreateControlPlaneTokenInput,
-  CreateWorkspaceAPIKeyInput,
-  CreateWorkspaceCompositionInput,
-  UpdateWorkspaceCompositionInput,
-  ReplaceWorkspaceCompositionMountsInput,
-  AddWorkspaceCompositionMountInput,
-  RemoveWorkspaceCompositionMountInput,
 } from "../types/afs";
 
 const LIVE_QUERY_STALE_MS = 10_000;
@@ -78,10 +73,6 @@ export const afsKeys = {
   databases: () => [...afsKeys.all, "databases"] as const,
   workspaceSummaries: (databaseId: string | null) =>
     [...afsKeys.all, "workspaces", databaseId ?? "all", "summaries"] as const,
-  workspaceCompositions: () =>
-    [...afsKeys.all, "workspace-compositions"] as const,
-  workspaceComposition: (workspaceId: string) =>
-    [...afsKeys.all, "workspace-compositions", workspaceId] as const,
   workspace: (databaseId: string | null, workspaceId: string) =>
     [...afsKeys.all, "workspaces", databaseId ?? "all", workspaceId] as const,
   agents: (databaseId: string | null) =>
@@ -297,24 +288,6 @@ export function workspaceSummariesQueryOptions(databaseId: string | null) {
   return queryOptions({
     queryKey: afsKeys.workspaceSummaries(databaseId),
     queryFn: () => afsApi.listWorkspaceSummaries(databaseId ?? ""),
-    staleTime: LIVE_QUERY_STALE_MS,
-    gcTime: LIVE_QUERY_GC_MS,
-  });
-}
-
-export function workspaceCompositionsQueryOptions() {
-  return queryOptions({
-    queryKey: afsKeys.workspaceCompositions(),
-    queryFn: () => afsApi.listWorkspaceCompositions(),
-    staleTime: LIVE_QUERY_STALE_MS,
-    gcTime: LIVE_QUERY_GC_MS,
-  });
-}
-
-export function workspaceCompositionQueryOptions(workspaceId: string) {
-  return queryOptions({
-    queryKey: afsKeys.workspaceComposition(workspaceId),
-    queryFn: () => afsApi.getWorkspaceComposition(workspaceId),
     staleTime: LIVE_QUERY_STALE_MS,
     gcTime: LIVE_QUERY_GC_MS,
   });
@@ -555,20 +528,6 @@ export function useWorkspaceSummaries(databaseId: string | null, enabled = true)
       enabled,
     },
   );
-}
-
-export function useWorkspaceCompositions(enabled = true) {
-  return useQuery({
-    ...workspaceCompositionsQueryOptions(),
-    enabled,
-  });
-}
-
-export function useWorkspaceComposition(workspaceId: string, enabled = true) {
-  return useQuery({
-    ...workspaceCompositionQueryOptions(workspaceId),
-    enabled: enabled && workspaceId !== "",
-  });
 }
 
 export function useWorkspace(databaseId: string | null, workspaceId: string, enabled = true) {
@@ -962,98 +921,6 @@ export function useCreateMCPAccessTokenMutation() {
   });
 }
 
-export function useCreateWorkspaceCompositionMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: CreateWorkspaceCompositionInput) =>
-      afsApi.createWorkspaceComposition(input),
-    onSuccess: (detail) => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(detail.id),
-      });
-    },
-  });
-}
-
-export function useUpdateWorkspaceCompositionMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: UpdateWorkspaceCompositionInput) =>
-      afsApi.updateWorkspaceComposition(input),
-    onSuccess: (detail) => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(detail.id),
-      });
-    },
-  });
-}
-
-export function useReplaceWorkspaceCompositionMountsMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: ReplaceWorkspaceCompositionMountsInput) =>
-      afsApi.replaceWorkspaceCompositionMounts(input),
-    onSuccess: (detail) => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(detail.id),
-      });
-    },
-  });
-}
-
-export function useAddWorkspaceCompositionMountMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: AddWorkspaceCompositionMountInput) =>
-      afsApi.addWorkspaceCompositionMount(input),
-    onSuccess: (detail) => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(detail.id),
-      });
-    },
-  });
-}
-
-export function useRemoveWorkspaceCompositionMountMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: RemoveWorkspaceCompositionMountInput) =>
-      afsApi.removeWorkspaceCompositionMount(input),
-    onSuccess: (detail) => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(detail.id),
-      });
-    },
-  });
-}
-
-export function useDeleteWorkspaceCompositionMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (workspaceId: string) => afsApi.deleteWorkspaceComposition(workspaceId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceCompositions(),
-      });
-    },
-  });
-}
-
 export function useRevokeMCPAccessTokenMutation() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -1081,9 +948,6 @@ export function useCreateCLIAccessTokenMutation() {
       void queryClient.invalidateQueries({
         queryKey: afsKeys.workspaceSummaries(variables.databaseId ?? null),
       });
-      void queryClient.invalidateQueries({
-        queryKey: afsKeys.workspaceComposition(variables.workspaceId),
-      });
       void queryClient.invalidateQueries({ queryKey: afsKeys.allCliTokens() });
     },
   });
@@ -1095,17 +959,6 @@ export function useRevokeCLIAccessTokenMutation() {
     mutationFn: (tokenId: string) => afsApi.revokeCLIAccessToken(tokenId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: afsKeys.allCliTokens() });
-    },
-  });
-}
-
-export function useCreateWorkspaceCompositionAPIKeyMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: CreateWorkspaceAPIKeyInput) =>
-      afsApi.createWorkspaceCompositionAPIKey(input),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: afsKeys.allMcpTokens() });
     },
   });
 }
@@ -1182,6 +1035,14 @@ export function useCreateWorkspaceMutation() {
     onSuccess: async () => {
       await invalidate();
     },
+  });
+}
+
+export function useForkWorkspaceMutation() {
+  const invalidate = useWorkspaceInvalidation();
+  return useMutation({
+    mutationFn: (input: ForkWorkspaceInput) => afsApi.forkWorkspace(input),
+    onSuccess: async () => { await invalidate(); },
   });
 }
 

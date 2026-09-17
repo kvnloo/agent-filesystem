@@ -212,6 +212,9 @@ func (s *Service) queryWorkspaceSemantic(ctx context.Context, workspace string, 
 	if err != nil {
 		return semanticUnavailableResponseWithMessage(request, queryEmbeddingUnavailableMessage(err)), nil
 	}
+	if err := queryindex.EnsureReady(ctx, s.store.rdb, WorkspaceFSKey(workspaceStorageID(meta)), request.Path, request.CandidateLimit); err != nil {
+		return semanticUnavailableResponseWithMessage(request, "Published workspace changes are still being indexed; retry the query."), nil
+	}
 	vectorResult, err := queryvector.Search(ctx, s.store.rdb, WorkspaceFSKey(workspaceStorageID(meta)), provider, queryText, queryvector.SearchOptions{
 		Path:           request.Path,
 		Limit:          request.Limit,
@@ -368,6 +371,9 @@ func (s *Service) QueryIndexStatus(ctx context.Context, workspace string, reques
 	queryPath := normalizeQueryPath(request.Path)
 	fsKey, err := s.workspaceQueryFSKey(ctx, workspace)
 	if err != nil {
+		return WorkspaceQueryIndexStatus{}, err
+	}
+	if err := queryindex.ReconcilePublications(ctx, s.store.rdb, fsKey); err != nil {
 		return WorkspaceQueryIndexStatus{}, err
 	}
 	if _, err := queryindex.ProcessPending(ctx, s.store.rdb, fsKey, queryindexStatusCatchupLimit); err != nil {

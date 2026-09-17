@@ -27,31 +27,6 @@ type hostedMCPProvider struct {
 	profile    string // empty for control-plane scope
 	readonly   bool
 	baseURL    string // absolute URL of /mcp (used by mcp_token_issue)
-	mounts     []hostedMCPMount
-}
-
-// hostedMCPMount captures a single mounted volume in the bound Agent Workspace
-// composition together with the per-mount capability granted by the API key.
-// Tools that take a path are routed by longest-matching MountPath to the
-// matching volume.
-type hostedMCPMount struct {
-	MountPath  string
-	VolumeID   string
-	VolumeName string
-	Readonly   bool
-	Capability string
-}
-
-func (m hostedMCPMount) writable() bool {
-	if m.Readonly {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(m.Capability)) {
-	case "", MCPCapabilityRW, MCPCapabilityRWCheckpoint, MCPCapabilityAdmin:
-		return true
-	default:
-		return false
-	}
 }
 
 func (p *hostedMCPProvider) isControlPlane() bool {
@@ -147,73 +122,17 @@ func hostedMCPProviderForRequest(ctx context.Context, manager *DatabaseManager, 
 		baseURL: deriveMCPBaseURL(r),
 	}
 	if !isControlPlane {
-		// Workspace-scoped tokens point at an Agent Workspace composition.
-		// Resolve its manifest, fold in the token's per-mount capabilities, and
-		// build the routing table. Multi-volume compositions route file_*
-		// tools by path prefix.
-		//
-		// If the bound id doesn't resolve to a composition (e.g. a direct
-		// volume-scoped token from internal tests), fall back to treating the
-		// id as a volume so the session still works.
 		provider.databaseID = strings.TrimSpace(identity.ScopedDatabaseID)
 		provider.profile = firstNonEmpty(strings.TrimSpace(identity.MCPProfile), MCPProfileWorkspaceRW)
 		provider.readonly = identity.Readonly
-
-		boundID := strings.TrimSpace(identity.ScopedWorkspaceID)
-		composition, err := manager.GetResolvedWorkspaceComposition(r.Context(), boundID)
-		switch {
-		case err == nil:
-			if len(composition.Mounts) == 0 {
-				return nil, createWorkspaceSessionRequest{}, "", fmt.Errorf("workspace %q has no mounted volumes — add one before connecting an MCP client", composition.Name)
-			}
-			capsByVolume := identity.WorkspaceMountCapabilities
-			provider.mounts = make([]hostedMCPMount, 0, len(composition.Mounts))
-			for _, mount := range composition.Mounts {
-				cap := strings.TrimSpace(capsByVolume[mount.VolumeID])
-				if cap == "" {
-					if mount.Readonly {
-						cap = MCPCapabilityRO
-					} else {
-						cap = firstNonEmpty(strings.TrimSpace(identity.Capability), MCPCapabilityRW)
-					}
-				}
-				provider.mounts = append(provider.mounts, hostedMCPMount{
-					MountPath:  normalizeMountPath(mount.MountPath),
-					VolumeID:   mount.VolumeID,
-					VolumeName: mount.VolumeName,
-					Readonly:   mount.Readonly,
-					Capability: cap,
-				})
-			}
-			// Default workspace/readonly for tools that don't carry a path —
-			// uses the first mount, but multi-mount sessions route per call.
-			provider.workspace = provider.mounts[0].VolumeName
-			provider.readonly = !provider.mounts[0].writable()
-		case errors.Is(err, os.ErrNotExist):
-			// Direct volume binding (no composition with this id) — use the
-			// volume name from the token directly. No multi-mount routing.
-			if strings.TrimSpace(identity.ScopedWorkspace) == "" {
-				return nil, createWorkspaceSessionRequest{}, "", ErrUnauthorized
-			}
-			provider.workspace = strings.TrimSpace(identity.ScopedWorkspace)
-		default:
-			return nil, createWorkspaceSessionRequest{}, "", fmt.Errorf("workspace %q lookup failed: %w", boundID, err)
+		// Resolve the stable tree ID, never a composition or a token's stale name.
+		_, _, route, err := manager.resolveScopedWorkspace(ctx, provider.databaseID, strings.TrimSpace(identity.ScopedWorkspaceID))
+		if err != nil {
+			return nil, createWorkspaceSessionRequest{}, "", ErrUnauthorized
 		}
+		provider.workspace = route.WorkspaceID
 	}
 	return provider, sessionInput, sessionID, nil
-}
-
-// normalizeMountPath returns a leading-slash absolute mount path with a single
-// trailing slash trimmed. "/" stays as "/".
-func normalizeMountPath(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" || trimmed == "/" {
-		return "/"
-	}
-	if !strings.HasPrefix(trimmed, "/") {
-		trimmed = "/" + trimmed
-	}
-	return strings.TrimRight(trimmed, "/")
 }
 
 // deriveMCPBaseURL reconstructs the absolute URL the caller reached /mcp at,
@@ -615,10 +534,11 @@ func (p *hostedMCPProvider) CallTool(ctx context.Context, name string, args map[
 	return p.callWorkspaceTool(ctx, name, args)
 }
 
-func (origProvider *hostedMCPProvider) callWorkspaceTool(ctx context.Context, name string, args map[string]any) mcpproto.ToolResult {
-	p, args, routeErr := origProvider.dispatchMountForTool(name, args)
-	if routeErr != nil {
-		return mcpErrorResult(routeErr)
+func (p *hostedMCPProvider) callWorkspaceTool(ctx context.Context, name string, args map[string]any) mcpproto.ToolResult {
+	// Check the grant before dispatch: returning an error after mutation would
+	// still allow an ordinary write token to restore or create checkpoints.
+	if !MCPProfileAllowsTool(p.profile, name) {
+		return mcpErrorResult(fmt.Errorf("tool %q is not available for mcp profile %q", name, p.profile))
 	}
 	var (
 		value any
@@ -769,9 +689,6 @@ func (origProvider *hostedMCPProvider) callWorkspaceTool(ctx context.Context, na
 	default:
 		err = fmt.Errorf("unknown tool %q", name)
 	}
-	if err == nil && !MCPProfileAllowsTool(p.profile, name) {
-		err = fmt.Errorf("tool %q is not available for mcp profile %q", name, p.profile)
-	}
 	if err != nil {
 		return mcpErrorResult(err)
 	}
@@ -783,133 +700,6 @@ func (p *hostedMCPProvider) ensureWritable() error {
 		return fmt.Errorf("this mcp token is read-only")
 	}
 	return nil
-}
-
-// dispatchMountForTool selects which mounted volume a workspace tool call should
-// target. For path-based file_* tools we pick the mount whose MountPath is the
-// longest prefix of args["path"], rewrite the path to be relative to that
-// mount, and clone the provider with that mount's volume + capability. For
-// non-path tools on multi-mount compositions we currently require a
-// single-mount workspace. Legacy direct-volume tokens (no mounts loaded) pass
-// through unchanged.
-func (origProvider *hostedMCPProvider) dispatchMountForTool(name string, args map[string]any) (*hostedMCPProvider, map[string]any, error) {
-	if len(origProvider.mounts) == 0 {
-		// Legacy direct-volume binding — no composition routing.
-		return origProvider, args, nil
-	}
-	pathArg, hasPath := readPathArgument(args)
-	if hasPath && strings.TrimSpace(pathArg) != "" {
-		match, relPath, ok := matchMountForPath(origProvider.mounts, pathArg)
-		if !ok {
-			return nil, nil, fmt.Errorf("path %q does not match any mounted volume in this workspace", pathArg)
-		}
-		nextArgs := cloneToolArgs(args)
-		nextArgs["path"] = relPath
-		return origProvider.cloneForMount(match), nextArgs, nil
-	}
-	// No path arg. checkpoint_/workspace_set_versioning_policy are
-	// volume-scoped — error on multi-mount sessions.
-	if len(origProvider.mounts) > 1 {
-		switch name {
-		case "checkpoint_create", "checkpoint_restore", "workspace_set_versioning_policy":
-			return nil, nil, fmt.Errorf("%q operates on a single volume but this workspace mounts %d. Scope your call to a workspace with one mount or specify a path", name, len(origProvider.mounts))
-		}
-	}
-	return origProvider.cloneForMount(origProvider.mounts[0]), args, nil
-}
-
-func (p *hostedMCPProvider) cloneForMount(mount hostedMCPMount) *hostedMCPProvider {
-	clone := *p
-	clone.workspace = mount.VolumeName
-	clone.readonly = !mount.writable()
-	clone.profile = profileForMountCap(p.profile, mount.Capability)
-	return &clone
-}
-
-// profileForMountCap collapses the original session profile down to a profile
-// the file tools recognize given the effective mount capability. The
-// implementation is intentionally conservative: if the mount is read-only,
-// every tool falls back to the workspace-ro profile.
-func profileForMountCap(originalProfile, capability string) string {
-	switch strings.ToLower(strings.TrimSpace(capability)) {
-	case MCPCapabilityRO:
-		return MCPProfileWorkspaceRO
-	case MCPCapabilityRWCheckpoint:
-		return MCPProfileWorkspaceRWCheckpoint
-	case MCPCapabilityRW:
-		return MCPProfileWorkspaceRW
-	}
-	return originalProfile
-}
-
-// readPathArgument extracts the "path" argument if present and string-shaped.
-func readPathArgument(args map[string]any) (string, bool) {
-	raw, ok := args["path"]
-	if !ok || raw == nil {
-		return "", false
-	}
-	str, ok := raw.(string)
-	if !ok {
-		return "", false
-	}
-	return str, true
-}
-
-func cloneToolArgs(args map[string]any) map[string]any {
-	if args == nil {
-		return map[string]any{}
-	}
-	clone := make(map[string]any, len(args))
-	for k, v := range args {
-		clone[k] = v
-	}
-	return clone
-}
-
-// matchMountForPath finds the mount whose MountPath is the longest prefix of
-// the requested path, returns the relative path under that mount. "/" mount
-// paths match anything. If no mount matches, ok=false.
-func matchMountForPath(mounts []hostedMCPMount, path string) (hostedMCPMount, string, bool) {
-	clean := normalizeMountPath(path)
-	if clean == "/" {
-		// Root path: in single-mount compositions, hand to the only mount.
-		// In multi-mount, no implicit choice.
-		if len(mounts) == 1 {
-			return mounts[0], "/", true
-		}
-		return hostedMCPMount{}, "", false
-	}
-	var (
-		bestMatch hostedMCPMount
-		bestLen   = -1
-	)
-	for _, mount := range mounts {
-		mountPath := normalizeMountPath(mount.MountPath)
-		if mountPath == "/" {
-			// Catch-all mount.
-			if 0 > bestLen {
-				bestMatch = mount
-				bestLen = 0
-			}
-			continue
-		}
-		if clean == mountPath || strings.HasPrefix(clean, mountPath+"/") {
-			if len(mountPath) > bestLen {
-				bestMatch = mount
-				bestLen = len(mountPath)
-			}
-		}
-	}
-	if bestLen < 0 {
-		return hostedMCPMount{}, "", false
-	}
-	rel := strings.TrimPrefix(clean, normalizeMountPath(bestMatch.MountPath))
-	if rel == "" {
-		rel = "/"
-	} else if !strings.HasPrefix(rel, "/") {
-		rel = "/" + rel
-	}
-	return bestMatch, rel, true
 }
 
 func (p *hostedMCPProvider) toolFileRead(ctx context.Context, args map[string]any) (any, error) {
@@ -1756,11 +1546,7 @@ func (p *hostedMCPProvider) mutateWorkspaceFile(ctx context.Context, args map[st
 	if err != nil {
 		return nil, err
 	}
-	if err := MarkWorkspaceRootDirty(ctx, resolved.service.store, resolved.storageID); err != nil {
-		return nil, err
-	}
-	resolved.meta.DirtyHint = true
-	if err := resolved.service.store.PutWorkspaceMeta(ctx, resolved.meta); err != nil {
+	if err := resolved.service.store.MarkWorkspaceDirtyHint(ctx, resolved.storageID); err != nil {
 		return nil, err
 	}
 	updatedStat, statErr := fsClient.Stat(ctx, normalizedPath)

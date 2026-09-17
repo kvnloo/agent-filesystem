@@ -146,6 +146,7 @@ func TestImportPipelineEndToEnd(t *testing.T) {
 
 	// Sync workspace root using the in-memory cache (no extra Redis reads).
 	if err := controlplane.SyncWorkspaceRootWithOptions(ctx, store, "demo", m, controlplane.SyncOptions{
+		ImportLockToken:    lock.Token(),
 		BlobProvider:       sink.Provider,
 		SkipNamespaceReset: true,
 	}); err != nil {

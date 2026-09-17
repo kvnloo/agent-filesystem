@@ -32,15 +32,15 @@ func TestSyncSaveOptions(t *testing.T) {
 }
 
 func TestSyncSaveDispatchAndHelp(t *testing.T) {
-	out, err := captureStdout(t, func() error { return cmdVolume([]string{"vol", "save", "--help"}) })
-	if err != nil || !strings.Contains(out, "vol save") || !strings.Contains(out, "Redis disk") {
+	out, err := captureStdout(t, func() error { return cmdWorkspace([]string{"ws", "save", "--help"}) })
+	if err != nil || !strings.Contains(out, "ws save") || !strings.Contains(out, "Redis disk") {
 		t.Fatalf("help = %q, %v", out, err)
 	}
-	if !strings.Contains(volumeUsageText("afs"), "save [--timeout 2m]") {
-		t.Fatal("volume help omits save")
+	if !strings.Contains(workspaceUsageText("afs"), "save [--timeout 2m]") {
+		t.Fatal("workspace help omits save")
 	}
-	out, err = captureStdout(t, func() error { return cmdVolume([]string{"vol", "save", "--json"}) })
-	var result syncControlResult
+	out, err = captureStdout(t, func() error { return cmdWorkspace([]string{"ws", "save", "--json"}) })
+	var result syncSaveOutput
 	if err == nil || json.Unmarshal([]byte(out), &result) != nil || result.Success || result.Error == "" {
 		t.Fatalf("invalid request must produce JSON failure: %q, %v", out, err)
 	}
@@ -50,11 +50,11 @@ func TestSyncSaveMountLookup(t *testing.T) {
 	withTempHome(t)
 	cfg := defaultConfig()
 	saveTempConfig(t, cfg)
-	rec := mountRecord{Workspace: "notes", WorkspaceID: "volume-id", LocalPath: t.TempDir(), Mode: modeSync, PID: os.Getpid()}
+	rec := mountRecord{Workspace: "notes", WorkspaceID: "workspace-id", LocalPath: t.TempDir(), Mode: modeSync, PID: os.Getpid()}
 	if err := saveMountRegistry(mountRegistry{Mounts: []mountRecord{rec}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{"notes", "volume-id", rec.LocalPath, filepath.Join(rec.LocalPath, ".")} {
+	for _, target := range []string{"notes", "workspace-id", rec.LocalPath, filepath.Join(rec.LocalPath, ".")} {
 		got, err := resolveSyncSaveMount(cfg, target)
 		if err != nil || got.LocalPath != rec.LocalPath {
 			t.Fatalf("lookup %q = %+v, %v", target, got, err)
@@ -80,7 +80,7 @@ func TestSyncSaveLegacyLookupIsConfigScoped(t *testing.T) {
 	withTempHome(t)
 	cfg := defaultConfig()
 	saveTempConfig(t, cfg)
-	st := state{CurrentWorkspace: "notes", CurrentWorkspaceID: "volume-id", LocalPath: t.TempDir(),
+	st := state{CurrentWorkspace: "notes", CurrentWorkspaceID: "workspace-id", LocalPath: t.TempDir(),
 		Mode: modeSync, SyncPID: os.Getpid(), ProductMode: cfg.ProductMode, RedisAddr: cfg.RedisAddr, RedisDB: cfg.RedisDB}
 	if err := saveState(st); err != nil {
 		t.Fatal(err)
@@ -204,15 +204,15 @@ func TestSyncSaveCommandStructuredResults(t *testing.T) {
 				}
 				return result
 			})
-			out, err := captureStdout(t, func() error { return cmdVolume([]string{"vol", "save", "notes", "--json", "--timeout", "1s"}) })
+			out, err := captureStdout(t, func() error { return cmdWorkspace([]string{"ws", "save", "notes", "--json", "--timeout", "1s"}) })
 			if replyErr := <-done; replyErr != nil {
 				t.Fatal(replyErr)
 			}
-			var result syncControlResult
+			var result syncSaveOutput
 			if decodeErr := json.Unmarshal([]byte(out), &result); decodeErr != nil {
 				t.Fatalf("stdout is not one JSON result: %q, %v", out, decodeErr)
 			}
-			if result.Success != success || result.Volume != "notes" || result.LocalRoot != root || (err == nil) != success {
+			if result.Success != success || result.Workspace != "notes" || result.LocalRoot != root || (err == nil) != success {
 				t.Fatalf("result = %+v, %v", result, err)
 			}
 			if success && (result.Save == nil || result.Save.Bytes != 7) {
@@ -232,13 +232,13 @@ func TestSyncSaveCommandStructuredResults(t *testing.T) {
 }
 
 func TestSyncSaveRejectsWrongReplyOrMissingReceipt(t *testing.T) {
-	for _, invalid := range []string{"volume", "root", "operation", "version", "receipt"} {
+	for _, invalid := range []string{"workspace", "root", "operation", "version", "receipt"} {
 		t.Run(invalid, func(t *testing.T) {
 			root := t.TempDir()
 			done := respondToSyncSave(root, func(req syncControlRequest) syncControlResult {
 				r := syncControlResult{Version: syncControlVersion, Operation: syncControlOpSave, Volume: req.Volume, LocalRoot: req.LocalRoot, Success: true, Save: &syncSaveReceipt{}}
 				switch invalid {
-				case "volume":
+				case "workspace":
 					r.Volume = "another"
 				case "root":
 					r.LocalRoot = "/other"

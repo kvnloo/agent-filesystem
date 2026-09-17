@@ -59,8 +59,8 @@ func TestWorkspaceCreateSelfHostedUsesDefaultOrExplicitDatabase(t *testing.T) {
 	cfg.DatabaseID = ""
 	saveTempConfig(t, cfg)
 
-	if err := cmdVolume([]string{"vol", "create", "default-created"}); err != nil {
-		t.Fatalf("cmdVolume(create default) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "default-created"}); err != nil {
+		t.Fatalf("cmdWorkspace(create default) returned error: %v", err)
 	}
 
 	resp, err := http.Get(server.URL + "/v1/workspaces/default-created")
@@ -79,8 +79,8 @@ func TestWorkspaceCreateSelfHostedUsesDefaultOrExplicitDatabase(t *testing.T) {
 		t.Fatalf("default-created database_id = %q, did not expect explicit secondary database", created.DatabaseID)
 	}
 
-	if err := cmdVolume([]string{"vol", "create", "--database", "secondary", "explicit-created"}); err != nil {
-		t.Fatalf("cmdVolume(create explicit) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "--database", "secondary", "explicit-created"}); err != nil {
+		t.Fatalf("cmdWorkspace(create explicit) returned error: %v", err)
 	}
 
 	resp, err = http.Get(server.URL + "/v1/workspaces/explicit-created")
@@ -108,8 +108,8 @@ func TestWorkspaceCreateSelfHostedFallsBackWhenConfiguredDatabaseMissing(t *test
 	cfg.DatabaseID = "afs-cloud"
 	saveTempConfig(t, cfg)
 
-	if err := cmdVolume([]string{"vol", "create", "stale-config-created"}); err != nil {
-		t.Fatalf("cmdVolume(create) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "stale-config-created"}); err != nil {
+		t.Fatalf("cmdWorkspace(create) returned error: %v", err)
 	}
 
 	resp, err := http.Get(server.URL + "/v1/workspaces/stale-config-created")

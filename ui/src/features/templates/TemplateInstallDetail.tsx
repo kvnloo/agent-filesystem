@@ -382,7 +382,7 @@ export function TemplateInstallDetail({
           <HintLine>
             <strong>Prefer the CLI?</strong> Run{" "}
             <code>
-              afs mcp --volume {workspace.name} --profile {template.profile}
+              afs mcp --workspace {workspace.name} --profile {template.profile}
             </code>{" "}
             after <code>afs auth login</code> with the token above.
           </HintLine>

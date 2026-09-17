@@ -30,7 +30,7 @@ fs.writeFile(path, content); // write a text file
 fs.listFiles(path, depth); // list a directory
 fs.glob(pattern, options); // match paths
 fs.grep(pattern, options); // search file contents
-fs.checkpoint(name); // checkpoint mounted workspaces
+fs.checkpoint(name); // checkpoint the workspace
 fs.bash().exec(command, options); // run a shell command against the mount
 ```
 
@@ -59,14 +59,14 @@ const afs = new AFS({ apiKey: process.env.AFS_API_KEY });
 const workspace = await afs.workspace.create({ name: "foobar" });
 
 const fs = await afs.fs.mount({
-  workspaces: [{ name: workspace.name }],
+  workspace: workspace.name,
   mode: "rw",
 });
 
 try {
   await fs.writeFile("/src/README.md", "hello world");
 
-  const result = await fs.bash().exec("cat /foobar/src/README.md");
+  const result = await fs.bash().exec("cat src/README.md");
   console.log(result.stdout);
 } finally {
   await fs.close();
@@ -249,7 +249,7 @@ mount. This is not a kernel FUSE or NFS mount.
 
 ```ts
 const fs = await afs.fs.mount({
-  workspaces: [{ name: "foobar" }],
+  workspace: "foobar",
   mode: "rw",
   tokenName: "optional token label",
 });
@@ -257,14 +257,14 @@ const fs = await afs.fs.mount({
 
 ```ts
 type MountInput = {
-  workspaces?: Array<{ name: string }>;
+  workspace: string | { name: string };
   mode?: "ro" | "rw" | "rw-checkpoint";
   tokenName?: string;
 };
 ```
 
-The preview `repos` mount option still works, but new code should use
-`workspaces`.
+Pass one workspace name or reference. The former `workspaces` and `repos`
+arrays are removed; create separate mount handles for separate workspaces.
 
 ### Modes
 
@@ -276,9 +276,8 @@ The preview `repos` mount option still works, but new code should use
 
 ### Path Rules
 
-- With one mounted workspace, `/src/file.ts` is workspace-relative.
-- With multiple mounted workspaces, paths must start with the workspace name,
-  such as `/api/src/file.ts` or `/web/package.json`.
+- File paths are relative to the workspace tree root, including `/src/file.ts`.
+- A directory matching the workspace name is a normal directory.
 - Paths are normalized as POSIX paths and cannot contain `..`.
 
 ## MountedFS API
@@ -289,11 +288,10 @@ and shell execution.
 ### Properties
 
 ```ts
-fs.workspaceNames: string[]
+fs.workspaceName: string
 fs.localRoot: string | undefined
 ```
 
-The preview `repoNames` property still works.
 
 ### File Methods
 
@@ -338,30 +336,29 @@ extra options to the hosted `file_grep` MCP tool.
 ### Checkpoint Method
 
 ```ts
-await fs.checkpoint(name?: string): Promise<Array<{
+await fs.checkpoint(name?: string): Promise<{
   workspace: string;
   checkpoint: string;
   created: boolean;
-}>>
+}>
 ```
 
-Creates a checkpoint for each mounted workspace.
+Creates one checkpoint from the workspace’s published Redis state. It cannot
+flush pending local files from other clients. Call `syncToRemote()` (TypeScript)
+or `sync_to_remote()` (Python) before checkpointing local SDK edits.
 
 ### Local Materialization
 
 ```ts
 await fs.syncFromRemote(): Promise<string>
 await fs.syncToRemote(): Promise<void>
-fs.mapAbsoluteWorkspacePaths(command: string): string
 await fs.close(): Promise<void>
 ```
 
-`syncFromRemote()` creates a temporary local directory and downloads mounted
-workspaces into it. `syncToRemote()` writes created and modified local text
+`syncFromRemote()` creates a temporary local directory and downloads the workspace
+tree directly into it. `syncToRemote()` writes created and modified local text
 files back through MCP. `close()` removes the temporary local directory.
 
-The preview `mapAbsoluteRepoPaths()` helper still works, but new code should
-use `mapAbsoluteWorkspacePaths()`.
 
 ## Bash API
 
@@ -398,9 +395,10 @@ type BashResult = {
 
 ### Behavior
 
-`bash().exec()` materializes workspaces, rewrites absolute workspace paths such
-as `/foobar/src/README.md` to the isolated local directory, runs the command,
-then syncs created and modified text files back to AFS.
+`bash().exec()` materializes the workspace tree into one temporary directory,
+runs the command there, then syncs created and modified text files back to AFS.
+Use relative shell paths such as `src/README.md`; absolute shell paths keep
+their ordinary host meaning.
 
 Nonzero exit codes are returned in `exitCode`. They do not throw by themselves.
 
@@ -408,7 +406,7 @@ Nonzero exit codes are returned in `exitCode`. They do not throw by themselves.
 
 ```ts
 const result = await fs.bash().exec("npm test", {
-  cwd: "foobar",
+  cwd: ".",
   timeoutMs: 120_000,
 });
 
@@ -454,8 +452,6 @@ new code should use `workspace` language:
 ```ts
 afs.repo;
 afs.repos;
-fs.repoNames;
-fs.mapAbsoluteRepoPaths(command);
 ```
 
 ## Current Limits

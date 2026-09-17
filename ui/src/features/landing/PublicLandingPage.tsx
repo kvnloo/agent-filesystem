@@ -138,7 +138,7 @@ export function PublicLandingPage() {
 
       <SectionIntro>
         <SectionKicker>What It Is For</SectionKicker>
-        <SectionTitle>Agent workspaces that behave like filesystems.</SectionTitle>
+        <SectionTitle>Workspaces that behave like filesystems.</SectionTitle>
         <SectionText>
           Agent Filesystem gives agents a shared, versioned file tree. Each file
           tree is a workspace. Mount that workspace to a local directory so

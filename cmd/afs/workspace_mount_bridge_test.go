@@ -49,8 +49,8 @@ func TestSeedWorkspaceMountKeyUsesWorkspaceHeadInsteadOfLocalTree(t *testing.T) 
 	if err != nil {
 		t.Fatalf("seedWorkspaceMountKey() returned error: %v", err)
 	}
-	if !initialized {
-		t.Fatal("expected first workspace mount open to initialize the live workspace root")
+	if initialized {
+		t.Fatal("mount open must reuse the explicitly initialized live root")
 	}
 	if head != "initial" {
 		t.Fatalf("head = %q, want %q", head, "initial")
@@ -130,8 +130,8 @@ func TestSeedWorkspaceMountKeyKeepsExistingLiveWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seedWorkspaceMountKey() returned error: %v", err)
 	}
-	if !initialized {
-		t.Fatal("expected first workspace mount open to initialize the live workspace root")
+	if initialized {
+		t.Fatal("mount open must reuse the explicitly initialized live root")
 	}
 
 	fsClient := client.New(store.rdb, mountKey)
@@ -162,51 +162,26 @@ func TestSeedWorkspaceMountKeyKeepsExistingLiveWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestSeedWorkspaceMountKeyRepairsWorkspaceRootWithoutReadyMarker(t *testing.T) {
-	t.Helper()
-
+func TestSeedWorkspaceMountKeyMissingRootDoesNotRepairFromCheckpoint(t *testing.T) {
 	_, store, closeStore := seedWorkspaceMountBridgeFixture(t)
 	defer closeStore()
-
 	ctx := context.Background()
-	fsClient := client.New(store.rdb, workspaceRedisKey("repo"))
-	if err := fsClient.Echo(ctx, "/stale.txt", []byte("stale\n")); err != nil {
-		t.Fatalf("Echo(/stale.txt) returned error: %v", err)
+	if err := store.rdb.Del(ctx, "afs:{repo}:inode:1").Err(); err != nil {
+		t.Fatal(err)
 	}
-
-	mountKey, head, initialized, err := seedWorkspaceMountKey(ctx, store, "repo")
+	before, err := store.rdb.Keys(ctx, "afs:{repo}:*").Result()
 	if err != nil {
-		t.Fatalf("seedWorkspaceMountKey() returned error: %v", err)
+		t.Fatal(err)
 	}
-	if !initialized {
-		t.Fatal("expected workspace mount open to repair an unmarked live workspace root")
+	if _, _, _, err := seedWorkspaceMountKey(ctx, store, "repo"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected explicit missing root error, got %v", err)
 	}
-	if head != "initial" {
-		t.Fatalf("head = %q, want %q", head, "initial")
-	}
-
-	staleStat, err := client.New(store.rdb, mountKey).Stat(ctx, "/stale.txt")
+	after, err := store.rdb.Keys(ctx, "afs:{repo}:*").Result()
 	if err != nil {
-		t.Fatalf("Stat(/stale.txt) returned error: %v", err)
+		t.Fatal(err)
 	}
-	if staleStat != nil {
-		t.Fatalf("expected stale.txt to be cleared during root repair, got %+v", staleStat)
-	}
-
-	data, err := client.New(store.rdb, mountKey).Cat(ctx, "/main.go")
-	if err != nil {
-		t.Fatalf("Cat(/main.go) returned error: %v", err)
-	}
-	if string(data) != "package main\n" {
-		t.Fatalf("mounted main.go = %q, want %q", string(data), "package main\n")
-	}
-
-	rootHead, err := store.rdb.Get(ctx, "afs:{repo}:root_head_savepoint").Result()
-	if err != nil {
-		t.Fatalf("Get(root_head_savepoint) returned error: %v", err)
-	}
-	if rootHead != "initial" {
-		t.Fatalf("root_head_savepoint = %q, want %q", rootHead, "initial")
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("mount lookup changed missing-root storage")
 	}
 }
 
@@ -619,6 +594,13 @@ func seedWorkspaceMountBridgeFixture(t *testing.T) (config, *afsStore, func()) {
 	sourceDir := t.TempDir()
 	writeTestFile(t, filepath.Join(sourceDir, "main.go"), "package main\n")
 	seedWorkspaceFromDirectory(t, store, "repo", "initial", sourceDir)
+	m, err := store.getManifest(context.Background(), "repo", "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.syncWorkspaceRoot(context.Background(), "repo", m); err != nil {
+		t.Fatal(err)
+	}
 	return loadedCfg, store, closeStore
 }
 

@@ -3,6 +3,7 @@ import { Fragment, useCallback, useMemo, useState } from "react";
 import styled from "styled-components";
 import {
   DialogBody,
+  DialogError,
   DialogCard,
   DialogCloseButton,
   DialogFooter,
@@ -119,12 +120,14 @@ export function CheckpointsTab({ workspace, onBrowserViewChange, onTabChange }: 
 
   return (
     <>
+      {createSavepoint.error || restoreSavepoint.error ? <DialogError role="alert">{(createSavepoint.error ?? restoreSavepoint.error)?.message}</DialogError> : null}
       {workspace.capabilities.createCheckpoint ? (
         <SectionGrid>
           <SectionCard $span={12}>
             <SectionHeader>
               <SectionTitle title="Create checkpoint" />
             </SectionHeader>
+            <DialogBody>Capture the current published Redis state. Files that a client has not synchronized are not included.</DialogBody>
             <FormGrid
               onSubmit={(event) => {
                 event.preventDefault();
@@ -133,12 +136,11 @@ export function CheckpointsTab({ workspace, onBrowserViewChange, onTabChange }: 
                 }
 
                 createSavepoint.mutate({
+                  databaseId: workspace.databaseId,
                   workspaceId: workspace.id,
                   name: savepointName,
                   note: savepointNote,
-                });
-                setSavepointName("");
-                setSavepointNote("");
+                }, { onSuccess: () => { setSavepointName(""); setSavepointNote(""); } });
               }}
             >
               <Field>
@@ -689,8 +691,8 @@ function CheckpointDiffDialog({
   const title = mode === "restore" ? `Restore ${savepoint.name}` : `Compare ${savepoint.name}`;
   const body =
     mode === "restore"
-      ? "Review how the active volume will change before restoring this checkpoint."
-      : "Review what changed between this checkpoint and the active volume.";
+      ? "Review how the active workspace will change before restoring this checkpoint."
+      : "Review what changed between this checkpoint and the active workspace.";
 
   return (
     <DialogOverlay onClick={onClose}>
@@ -840,7 +842,7 @@ function InlineTextDiff({ entry }: { entry: AFSDiffEntry }) {
 }
 
 function viewLabel(workspace: AFSWorkspaceDetail, view: AFSWorkspaceView) {
-  if (view === "working-copy" || view === "head") return "Active volume";
+  if (view === "working-copy" || view === "head") return "Active workspace";
   const checkpointId = view.replace(/^checkpoint:/, "");
   const savepoint = workspace.savepoints.find((item) => item.id === checkpointId);
   return savepoint ? `Checkpoint ${savepoint.name}` : `Checkpoint ${checkpointId}`;

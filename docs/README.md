@@ -32,3 +32,5 @@ work, and archived planning notes live under root [../plans/](../plans/).
   under `docs/`.
 - Raw benchmark output belongs outside the repo, usually under `/tmp`; summarize
   durable conclusions in [internals/performance.md](internals/performance.md).
+
+- [Single-tree workspace migration](guides/single-tree-migration.md): explicit adoption, preserved grants, and current AFS compatibility.

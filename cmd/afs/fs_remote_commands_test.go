@@ -68,8 +68,8 @@ func TestFSRemoteCommandsListCatAndFind(t *testing.T) {
 	writeTestFile(t, filepath.Join(sourceDir, "notes", "todo.md"), "- item\n")
 	writeTestFile(t, filepath.Join(sourceDir, "notes", "data.txt"), "data\n")
 
-	if err := cmdVolume([]string{"vol", "import", "repo", sourceDir}); err != nil {
-		t.Fatalf("cmdVolume(import) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "import", "repo", sourceDir}); err != nil {
+		t.Fatalf("cmdWorkspace(import) returned error: %v", err)
 	}
 	_, _, closeStore, err := openAFSStore(context.Background())
 	if err != nil {

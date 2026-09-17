@@ -239,8 +239,8 @@ export function CreateWorkspaceDialog({
         });
         onClose();
         void navigate({
-          to: "/volumes/$volumeId",
-          params: { volumeId: result.workspaceId },
+          to: "/workspaces/$workspaceId",
+          params: { workspaceId: result.workspaceId },
           search: { databaseId: result.databaseId, tab: "browse" },
         });
       } catch (error) {

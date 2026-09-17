@@ -181,7 +181,7 @@ func (directBackend) OpenSession(ctx context.Context, cfg config) (*afsBackendSe
 	}
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		closeFn()
-		return nil, fmt.Errorf("cannot connect to Redis at %s: %w\nRun '%s vol mount <volume> <directory>' first or point AFS at an existing Redis server",
+		return nil, fmt.Errorf("cannot connect to Redis at %s: %w\nRun '%s ws mount <workspace> <directory>' first or point AFS at an existing Redis server",
 			cfg.RedisAddr, err, filepath.Base(os.Args[0]))
 	}
 

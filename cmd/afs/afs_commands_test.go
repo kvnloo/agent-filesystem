@@ -607,7 +607,7 @@ func TestResolveWorkspaceSetDefaultSelectionExplainsMountedWorkspaceFromOtherCon
 		t.Fatal("resolveWorkspaceSetDefaultSelection() returned nil error, want config mismatch")
 	}
 	for _, want := range []string{
-		`volume "first-workspace" is mounted from Self-managed http://127.0.0.1:8091 (localhost-6379)`,
+		`workspace "first-workspace" is mounted from Self-managed http://127.0.0.1:8091 (localhost-6379)`,
 		"current config uses Cloud-managed https://afs.cloud (afs-cloud)",
 		"status --verbose",
 	} {
@@ -712,7 +712,7 @@ func TestResolveWorkspaceSelectionMultipleMountsRequireWorkspace(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolveWorkspaceSelectionFromSummaries() returned nil error, want multiple-mount guidance")
 	}
-	if !strings.Contains(err.Error(), "multiple volumes are mounted") {
+	if !strings.Contains(err.Error(), "multiple workspaces are mounted") {
 		t.Fatalf("error = %q, want multiple-mount guidance", err)
 	}
 }
@@ -799,7 +799,7 @@ func TestPromptWorkspaceSelectionShowsWorkspaceIDAndDatabase(t *testing.T) {
 		t.Fatalf("selection = %+v, want prompted alpha", selection)
 	}
 	stripped := stripAnsi(out)
-	for _, want := range []string{"Volume ID", "Database", "ws_alpha", "Primary Redis", "ws_beta", "Secondary Redis"} {
+	for _, want := range []string{"Workspace ID", "Database", "ws_alpha", "Primary Redis", "ws_beta", "Secondary Redis"} {
 		if !strings.Contains(stripped, want) {
 			t.Fatalf("prompt output = %q, want %q", out, want)
 		}
@@ -848,10 +848,10 @@ func TestResolveWorkspaceSelectionFromControlPlaneDefaultWorkspaceAmbiguityInclu
 	if err == nil {
 		t.Fatal("resolveWorkspaceSelectionFromControlPlane() returned nil error, want default-workspace ambiguity guidance")
 	}
-	if !strings.Contains(err.Error(), `default volume "getting-started" is ambiguous`) {
+	if !strings.Contains(err.Error(), `default workspace "getting-started" is ambiguous`) {
 		t.Fatalf("error = %q, want default workspace ambiguity preamble", err)
 	}
-	if !strings.Contains(err.Error(), "vol set-default <volume-id>") {
+	if !strings.Contains(err.Error(), "ws set-default <workspace-id>") {
 		t.Fatalf("error = %q, want recovery command", err)
 	}
 }
@@ -928,7 +928,7 @@ func TestCurrentWorkspaceNameErrorsWhenConfiguredDefaultWorkspaceMissing(t *test
 	if err == nil {
 		t.Fatal("currentWorkspaceName() returned nil error, want missing default workspace error")
 	}
-	if !strings.Contains(err.Error(), `default volume "missing" does not exist`) {
+	if !strings.Contains(err.Error(), `default workspace "missing" does not exist`) {
 		t.Fatalf("currentWorkspaceName() error = %q, want missing configured default workspace", err)
 	}
 }
@@ -958,7 +958,7 @@ func TestCurrentWorkspaceNameErrorsWhenNoWorkspaceCanBeInferred(t *testing.T) {
 	if err == nil {
 		t.Fatal("currentWorkspaceName() returned nil error, want explicit workspace error")
 	}
-	if !strings.Contains(err.Error(), "volume is required") {
+	if !strings.Contains(err.Error(), "workspace is required") {
 		t.Fatalf("currentWorkspaceName() error = %q, want missing workspace guidance", err)
 	}
 }
@@ -1029,12 +1029,12 @@ func TestCmdImportCreatesWorkspaceAndCommandsSucceed(t *testing.T) {
 		t.Fatalf("expected no working copy after import, got err=%v", err)
 	}
 
-	if err := cmdVolume([]string{"vol", "list"}); err != nil {
-		t.Fatalf("cmdVolume(list) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "list"}); err != nil {
+		t.Fatalf("cmdWorkspace(list) returned error: %v", err)
 	}
 	clonedDir := filepath.Join(t.TempDir(), "repo-clone")
-	if err := cmdVolume([]string{"vol", "clone", "repo", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", "repo", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone) returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(clonedDir, "main.go")); err != nil {
 		t.Fatalf("expected cloned directory to contain main.go: %v", err)
@@ -1280,8 +1280,8 @@ func TestCmdImportHandlesEmptyFiles(t *testing.T) {
 	}
 
 	clonedDir := filepath.Join(t.TempDir(), "repo-clone")
-	if err := cmdVolume([]string{"vol", "clone", "repo", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", "repo", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone) returned error: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(clonedDir, "empty.txt"))
@@ -1312,8 +1312,8 @@ func TestCmdWorkspaceCloneCreatesLocalCopy(t *testing.T) {
 		t.Fatalf("cmdImport() returned error: %v", err)
 	}
 	clonedDir := filepath.Join(t.TempDir(), "repo-clone")
-	if err := cmdVolume([]string{"vol", "clone", "repo", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", "repo", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone) returned error: %v", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(clonedDir, "docs", "notes.md")); err != nil {
@@ -1359,8 +1359,8 @@ func TestCmdWorkspaceCloneIncludesLiveWorkspaceChanges(t *testing.T) {
 	}
 
 	clonedDir := filepath.Join(t.TempDir(), "repo-live-clone")
-	if err := cmdVolume([]string{"vol", "clone", "repo", clonedDir}); err != nil {
-		t.Fatalf("cmdVolume(clone live) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "clone", "repo", clonedDir}); err != nil {
+		t.Fatalf("cmdWorkspace(clone live) returned error: %v", err)
 	}
 
 	if got, err := os.ReadFile(filepath.Join(clonedDir, "docs", "notes.md")); err != nil {

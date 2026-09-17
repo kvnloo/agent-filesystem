@@ -33,26 +33,26 @@ func TestVolumeRootShortcutsAreDocumentedAliases(t *testing.T) {
 		"set-default", "unset-default", "info", "import", "fork",
 		"delete",
 	} {
-		if !isVolumeRootShortcut(command) {
-			t.Fatalf("isVolumeRootShortcut(%q) = false, want true", command)
+		if !isWorkspaceRootShortcut(command) {
+			t.Fatalf("isWorkspaceRootShortcut(%q) = false, want true", command)
 		}
 	}
 	for _, command := range []string{"mount", "unmount", "status", "fs", "cp", "log", "config", "reset", "versioning"} {
-		if isVolumeRootShortcut(command) {
-			t.Fatalf("isVolumeRootShortcut(%q) = true, want false", command)
+		if isWorkspaceRootShortcut(command) {
+			t.Fatalf("isWorkspaceRootShortcut(%q) = true, want false", command)
 		}
 	}
 
-	got := volumeRootShortcutArgs([]string{"create", "demo"})
-	want := []string{"vol", "create", "demo"}
+	got := workspaceRootShortcutArgs([]string{"create", "demo"})
+	want := []string{"ws", "create", "demo"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("volumeRootShortcutArgs() = %q, want %q", got, want)
+		t.Fatalf("workspaceRootShortcutArgs() = %q, want %q", got, want)
 	}
 
 	out := captureStderrText(t, printUsage)
 	plain := stripAnsi(out)
 	for _, documented := range []string{
-		"Agent Workspace Shortcuts", "mount", "unmount", "Volume Shortcuts",
+		"Workspace Shortcuts", "mount", "unmount",
 		"create", "list", "clone",
 		"default", "set-default", "unset-default", "info", "import", "fork",
 		"delete",
@@ -64,16 +64,10 @@ func TestVolumeRootShortcutsAreDocumentedAliases(t *testing.T) {
 	if strings.Contains(out, "  reset") {
 		t.Fatalf("top-level help should not document non-workspace shortcut %q:\n%s", "reset", out)
 	}
-	if strings.Contains(plain, `Omit "vol" for: mount, unmount`) {
-		t.Fatalf("top-level help should not document mount/unmount as volume shortcuts:\n%s", plain)
-	}
-	if !strings.Contains(plain, "map to Agent Workspace manifests") {
-		t.Fatalf("top-level help should explain root mount/unmount workspace mapping:\n%s", plain)
-	}
-	cpIndex := strings.Index(plain, "cp (checkpoint)")
-	volIndex := strings.Index(plain, "vol (volume) - direct support for underlying volumes - create, import, list, etc.")
-	if cpIndex < 0 || volIndex < 0 || volIndex < cpIndex {
-		t.Fatalf("top-level help should list vol under cp with direct-volume copy:\n%s", plain)
+	for _, obsolete := range []string{"Agent Workspace", "Volume", "vol (volume)", "manifest"} {
+		if strings.Contains(plain, obsolete) {
+			t.Fatalf("obsolete composition terminology %q in help: %s", obsolete, plain)
+		}
 	}
 	if !strings.Contains(plain, "Filesystem Shortcuts") {
 		t.Fatalf("top-level help should document filesystem shortcuts:\n%s", plain)

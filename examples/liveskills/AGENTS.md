@@ -29,19 +29,20 @@ Do not make users think about publish/register in the happy path. `add` should r
 
 ## AFS Boundary
 
-AFS supports direct volume mounts:
+AFS supports one-tree workspace mounts:
 
 ```bash
-afs vol mount <volume> <directory>
+afs ws mount <workspace> <directory>
 ```
 
-For LiveSkills, use direct volume mounts, not `afs ws mount`.
+For LiveSkills, mount each skill workspace independently. The collection parent
+is a local directory and must not be created or mounted as another AFS workspace.
 
 The desired production shape is:
 
 ```text
-.agents/skills/<skill>     <- direct AFS volume mount
-~/.codex/skills/<skill>    <- direct AFS volume mount
+.agents/skills/<skill>     <- AFS workspace mount
+~/.codex/skills/<skill>    <- AFS workspace mount
 ```
 
 `afs.go` currently contains `LocalAFSAdapter`, a local development stand-in. It materializes checkpoint files and writes mount metadata, but the production integration should replace that boundary with real control-plane/AFS calls while preserving CLI behavior.

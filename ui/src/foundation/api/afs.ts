@@ -19,8 +19,8 @@ import type {
   CreateMCPTokenInput,
   CreateCLIAccessTokenInput,
   CreateControlPlaneTokenInput,
-  CreateWorkspaceAPIKeyInput,
   CreateWorkspaceInput,
+  ForkWorkspaceInput,
   GetWorkspaceFileContentInput,
   GetWorkspaceDiffInput,
   GetWorkspaceTreeInput,
@@ -46,17 +46,9 @@ import type {
   AFSWorkspaceQueryIndexRebuildResponse,
   AFSWorkspaceQueryIndexStatus,
   AFSWorkspaceSource,
-  AFSWorkspaceCompositionDetail,
-  AFSWorkspaceCompositionMount,
-  AFSWorkspaceCompositionSummary,
   AFSWorkspaceSummary,
   AFSWorkspaceVersioningPolicy,
   AFSWorkspaceView,
-  CreateWorkspaceCompositionInput,
-  UpdateWorkspaceCompositionInput,
-  ReplaceWorkspaceCompositionMountsInput,
-  AddWorkspaceCompositionMountInput,
-  RemoveWorkspaceCompositionMountInput,
   DiffFileVersionsInput,
   GetFileHistoryInput,
   GetFileVersionContentInput,
@@ -103,32 +95,13 @@ type AFSClient = {
   listWorkspaceSummaries: (
     databaseId?: string,
   ) => Promise<AFSWorkspaceSummary[]>;
-  listWorkspaceCompositions: () => Promise<AFSWorkspaceCompositionSummary[]>;
-  getWorkspaceComposition: (
-    workspaceId: string,
-  ) => Promise<AFSWorkspaceCompositionDetail | null>;
-  createWorkspaceComposition: (
-    input: CreateWorkspaceCompositionInput,
-  ) => Promise<AFSWorkspaceCompositionDetail>;
-  updateWorkspaceComposition: (
-    input: UpdateWorkspaceCompositionInput,
-  ) => Promise<AFSWorkspaceCompositionDetail>;
-  replaceWorkspaceCompositionMounts: (
-    input: ReplaceWorkspaceCompositionMountsInput,
-  ) => Promise<AFSWorkspaceCompositionDetail>;
-  addWorkspaceCompositionMount: (
-    input: AddWorkspaceCompositionMountInput,
-  ) => Promise<AFSWorkspaceCompositionDetail>;
-  removeWorkspaceCompositionMount: (
-    input: RemoveWorkspaceCompositionMountInput,
-  ) => Promise<AFSWorkspaceCompositionDetail>;
-  deleteWorkspaceComposition: (workspaceId: string) => Promise<void>;
   getWorkspace: (
     databaseId: string | undefined,
     workspaceId: string,
   ) => Promise<AFSWorkspaceDetail | null>;
   listAgents: (databaseId?: string) => Promise<AFSAgentSession[]>;
   createWorkspace: (input: CreateWorkspaceInput) => Promise<AFSWorkspaceDetail>;
+  forkWorkspace: (input: ForkWorkspaceInput) => Promise<AFSWorkspaceDetail | null>;
   deleteWorkspace: (databaseId: string, workspaceId: string) => Promise<void>;
   updateWorkspace: (
     input: UpdateWorkspaceInput,
@@ -203,9 +176,6 @@ type AFSClient = {
     workspaceId: string,
   ) => Promise<AFSMCPToken[]>;
   createMCPAccessToken: (input: CreateMCPTokenInput) => Promise<AFSMCPToken>;
-  createWorkspaceCompositionAPIKey: (
-    input: CreateWorkspaceAPIKeyInput,
-  ) => Promise<AFSMCPToken>;
   createCLIAccessToken: (
     input: CreateCLIAccessTokenInput,
   ) => Promise<AFSCLIAccessToken>;
@@ -367,68 +337,6 @@ type HTTPWorkspaceSummary = {
   region: string;
   source: AFSWorkspaceSource;
   template_slug?: string;
-};
-
-type HTTPWorkspaceCompositionMount = {
-  volume_id: string;
-  volume_name?: string;
-  mount_path: string;
-  readonly?: boolean;
-  volume_token_id?: string;
-};
-
-type HTTPWorkspaceCompositionVolumeLabel = {
-  id: string;
-  name?: string;
-  mount_path: string;
-  readonly?: boolean;
-};
-
-type HTTPWorkspaceBookmarkVolume = {
-  volume_id: string;
-  volume_name?: string;
-  checkpoint_id: string;
-};
-
-type HTTPWorkspaceBookmark = {
-  workspace_id: string;
-  name: string;
-  description?: string;
-  volumes?: HTTPWorkspaceBookmarkVolume[];
-  created_at: string;
-};
-
-type HTTPWorkspaceCompositionSummary = {
-  id: string;
-  name: string;
-  description?: string;
-  database_id?: string;
-  database_name?: string;
-  cloud_account?: string;
-  owner_subject?: string;
-  owner_label?: string;
-  mount_count: number;
-  mounted_volumes?: HTTPWorkspaceCompositionVolumeLabel[];
-  connected_agent_count?: number;
-  last_activity_at?: string;
-  updated_at: string;
-};
-
-type HTTPWorkspaceCompositionDetail = {
-  id: string;
-  name: string;
-  description?: string;
-  database_id?: string;
-  database_name?: string;
-  cloud_account?: string;
-  owner_subject?: string;
-  owner_label?: string;
-  mounts?: HTTPWorkspaceCompositionMount[];
-  bookmarks?: HTTPWorkspaceBookmark[];
-  connected_agent_count?: number;
-  created_at: string;
-  updated_at: string;
-  last_activity_at?: string;
 };
 
 type HTTPCheckpoint = {
@@ -891,7 +799,6 @@ type HTTPMCPToken = {
   profile?: string;
   capability?: string;
   readonly?: boolean;
-  mount_capabilities?: { volume_id: string; capability: string }[];
   token?: string;
   created_at: string;
   last_used_at?: string;
@@ -931,10 +838,6 @@ function mapHTTPMCPToken(
       profileFallback) as AFSMCPToken["profile"],
     capability: item.capability,
     readonly: Boolean(item.readonly),
-    mountCapabilities: (item.mount_capabilities ?? []).map((mc) => ({
-      volumeId: mc.volume_id,
-      capability: mc.capability,
-    })),
     token: item.token,
     createdAt: item.created_at,
     lastUsedAt: item.last_used_at,
@@ -1030,7 +933,7 @@ function inferLocalHTTPBaseURL() {
   if (hostname !== "127.0.0.1" && hostname !== "localhost") {
     return "";
   }
-  return `${window.location.protocol}//${hostname}:8091`;
+  return import.meta.env.DEV ? `${window.location.protocol}//${hostname}:8091` : "";
 }
 
 const HTTP_BASE_URL = (
@@ -1830,151 +1733,6 @@ const demoAFSClient: AFSClient = {
     return sortWorkspaces(workspaces).map(workspaceToSummary);
   },
 
-  async listWorkspaceCompositions() {
-    await wait();
-    const volumes = sortWorkspaces(loadState().workspaces.map(normalizeWorkspace)).map(
-      workspaceToSummary,
-    );
-    return volumes.map((volume) => ({
-      id: `ws_${volume.id}`,
-      name: volume.name,
-      description: "Demo workspace composed from one volume.",
-      databaseId: volume.databaseId,
-      databaseName: volume.databaseName,
-      cloudAccount: volume.cloudAccount,
-      mountCount: 1,
-      mountedVolumes: [
-        {
-          id: volume.id,
-          name: volume.name,
-          mountPath: "/",
-          readonly: false,
-        },
-      ],
-      connectedAgentCount: 0,
-      updatedAt: volume.updatedAt,
-    }));
-  },
-
-  async getWorkspaceComposition(workspaceId: string) {
-    await wait();
-    const volumes = sortWorkspaces(loadState().workspaces.map(normalizeWorkspace)).map(
-      workspaceToSummary,
-    );
-    const workspaces = volumes.map((volume) => ({
-      id: `ws_${volume.id}`,
-      name: volume.name,
-      description: "Demo workspace composed from one volume.",
-      databaseId: volume.databaseId,
-      databaseName: volume.databaseName,
-      cloudAccount: volume.cloudAccount,
-      mountCount: 1,
-      mountedVolumes: [
-        {
-          id: volume.id,
-          name: volume.name,
-          mountPath: "/",
-          readonly: false,
-        },
-      ],
-      connectedAgentCount: 0,
-      updatedAt: volume.updatedAt,
-    }));
-    const summary = workspaces.find(
-      (item) => item.id === workspaceId || item.name === workspaceId,
-    );
-    if (summary == null) {
-      return null;
-    }
-    return {
-      ...summary,
-      mounts: summary.mountedVolumes.map((volume) => ({
-        volumeId: volume.id,
-        volumeName: volume.name,
-        mountPath: volume.mountPath,
-        readonly: volume.readonly,
-      })),
-      bookmarks: [],
-      createdAt: summary.updatedAt,
-    };
-  },
-
-  async createWorkspaceComposition(input: CreateWorkspaceCompositionInput) {
-    await wait();
-    const now = nowISO();
-    return {
-      id: `ws_${slugify(input.name)}`,
-      name: input.name,
-      description: input.description,
-      mounts: input.mounts ?? [],
-      bookmarks: [],
-      connectedAgentCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-  },
-
-  async updateWorkspaceComposition(input: UpdateWorkspaceCompositionInput) {
-    await wait();
-    const now = nowISO();
-    return {
-      id: input.workspaceId,
-      name: input.name ?? input.workspaceId,
-      description: input.description,
-      mounts: [],
-      bookmarks: [],
-      connectedAgentCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-  },
-
-  async replaceWorkspaceCompositionMounts(input: ReplaceWorkspaceCompositionMountsInput) {
-    await wait();
-    const now = nowISO();
-    return {
-      id: input.workspaceId,
-      name: input.workspaceId,
-      mounts: input.mounts,
-      bookmarks: [],
-      connectedAgentCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-  },
-
-  async addWorkspaceCompositionMount(input: AddWorkspaceCompositionMountInput) {
-    await wait();
-    const now = nowISO();
-    return {
-      id: input.workspaceId,
-      name: input.workspaceId,
-      mounts: [input.mount],
-      bookmarks: [],
-      connectedAgentCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-  },
-
-  async removeWorkspaceCompositionMount(input: RemoveWorkspaceCompositionMountInput) {
-    await wait();
-    const now = nowISO();
-    return {
-      id: input.workspaceId,
-      name: input.workspaceId,
-      mounts: [],
-      bookmarks: [],
-      connectedAgentCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-  },
-
-  async deleteWorkspaceComposition() {
-    await wait();
-  },
-
   async getWorkspace(databaseId = "", workspaceId: string) {
     await wait();
     const state = loadState();
@@ -1995,6 +1753,26 @@ const demoAFSClient: AFSClient = {
       )
       .flatMap((workspace) => normalizeWorkspace(workspace).agents)
       .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt));
+  },
+
+  async forkWorkspace(input: ForkWorkspaceInput) {
+    await wait();
+    const state = updateState((draft) => {
+      const source = requireWorkspace(draft, input.workspaceId);
+      if (!matchesOptionalDatabase(input.databaseId, source)) throw new Error("Workspace not found.");
+      const name = input.name.trim();
+      if (!name || draft.workspaces.some((workspace) => workspace.databaseId === source.databaseId && workspace.name === name)) {
+        throw new Error("Choose a unique workspace name.");
+      }
+      const fork = clone(source);
+      fork.id = slugify(name);
+      fork.name = name;
+      fork.agents = [];
+      fork.createdAt = nowISO();
+      fork.updatedAt = fork.createdAt;
+      draft.workspaces.push(fork);
+    });
+    return normalizeWorkspace(requireWorkspace(state, slugify(input.name)));
   },
 
   async createWorkspace(input: CreateWorkspaceInput) {
@@ -2602,10 +2380,6 @@ This workspace was created from the AFS Web UI.
 
   async createMCPAccessToken() {
     throw new Error("MCP tokens are not available in demo mode.");
-  },
-
-  async createWorkspaceCompositionAPIKey() {
-    throw new Error("API keys are not available in demo mode.");
   },
 
   async createCLIAccessToken() {
@@ -3247,98 +3021,6 @@ function mapWorkspaceSummary(input: HTTPWorkspaceSummary): AFSWorkspaceSummary {
   };
 }
 
-function mapWorkspaceCompositionMount(
-  input: HTTPWorkspaceCompositionMount,
-): AFSWorkspaceCompositionMount {
-  return {
-    volumeId: input.volume_id,
-    volumeName: input.volume_name,
-    mountPath: input.mount_path,
-    readonly: Boolean(input.readonly),
-    volumeTokenId: input.volume_token_id,
-  };
-}
-
-function mapWorkspaceCompositionVolumeLabel(
-  input: HTTPWorkspaceCompositionVolumeLabel,
-) {
-  return {
-    id: input.id,
-    name: input.name,
-    mountPath: input.mount_path,
-    readonly: Boolean(input.readonly),
-  };
-}
-
-function mapWorkspaceBookmark(input: HTTPWorkspaceBookmark) {
-  return {
-    workspaceId: input.workspace_id,
-    name: input.name,
-    description: input.description,
-    volumes: (input.volumes ?? []).map((volume) => ({
-      volumeId: volume.volume_id,
-      volumeName: volume.volume_name,
-      checkpointId: volume.checkpoint_id,
-    })),
-    createdAt: input.created_at,
-  };
-}
-
-function mapWorkspaceCompositionSummary(
-  input: HTTPWorkspaceCompositionSummary,
-): AFSWorkspaceCompositionSummary {
-  return {
-    id: input.id,
-    name: input.name,
-    description: input.description,
-    databaseId: input.database_id,
-    databaseName: input.database_name,
-    cloudAccount: input.cloud_account,
-    ownerSubject: input.owner_subject,
-    ownerLabel: input.owner_label,
-    mountCount: input.mount_count,
-    mountedVolumes: (input.mounted_volumes ?? []).map(
-      mapWorkspaceCompositionVolumeLabel,
-    ),
-    connectedAgentCount: input.connected_agent_count ?? 0,
-    lastActivityAt: input.last_activity_at,
-    updatedAt: input.updated_at,
-  };
-}
-
-function mapWorkspaceCompositionDetail(
-  input: HTTPWorkspaceCompositionDetail,
-): AFSWorkspaceCompositionDetail {
-  return {
-    id: input.id,
-    name: input.name,
-    description: input.description,
-    databaseId: input.database_id,
-    databaseName: input.database_name,
-    cloudAccount: input.cloud_account,
-    ownerSubject: input.owner_subject,
-    ownerLabel: input.owner_label,
-    mounts: (input.mounts ?? []).map(mapWorkspaceCompositionMount),
-    bookmarks: (input.bookmarks ?? []).map(mapWorkspaceBookmark),
-    connectedAgentCount: input.connected_agent_count ?? 0,
-    createdAt: input.created_at,
-    updatedAt: input.updated_at,
-    lastActivityAt: input.last_activity_at,
-  };
-}
-
-function workspaceCompositionMountToHTTP(
-  input: AFSWorkspaceCompositionMount,
-): HTTPWorkspaceCompositionMount {
-  return {
-    volume_id: input.volumeId,
-    volume_name: input.volumeName,
-    mount_path: input.mountPath,
-    readonly: input.readonly,
-    volume_token_id: input.volumeTokenId,
-  };
-}
-
 function mapWorkspaceDetail(input: HTTPWorkspaceDetail): AFSWorkspaceDetail {
   return {
     id: input.id,
@@ -3846,99 +3528,6 @@ const httpAFSClient: AFSClient = {
     return response.items.map(mapWorkspaceSummary);
   },
 
-  async listWorkspaceCompositions() {
-    const response = await requestJSON<{
-      items: HTTPWorkspaceCompositionSummary[];
-    }>("/v2/workspaces");
-    return response.items.map(mapWorkspaceCompositionSummary);
-  },
-
-  async getWorkspaceComposition(workspaceId: string) {
-    try {
-      return mapWorkspaceCompositionDetail(
-        await requestJSON<HTTPWorkspaceCompositionDetail>(
-          `/v2/workspaces/${encodeURIComponent(workspaceId)}`,
-        ),
-      );
-    } catch (error) {
-      if (error instanceof HTTPError && error.status === 404) {
-        return null;
-      }
-      throw error;
-    }
-  },
-
-  async createWorkspaceComposition(input: CreateWorkspaceCompositionInput) {
-    return mapWorkspaceCompositionDetail(
-      await requestJSON<HTTPWorkspaceCompositionDetail>("/v2/workspaces", {
-        method: "POST",
-        body: JSON.stringify({
-          name: input.name,
-          description: input.description,
-          database_id: input.databaseId,
-          mounts: (input.mounts ?? []).map(workspaceCompositionMountToHTTP),
-        }),
-      }),
-    );
-  },
-
-  async updateWorkspaceComposition(input: UpdateWorkspaceCompositionInput) {
-    return mapWorkspaceCompositionDetail(
-      await requestJSON<HTTPWorkspaceCompositionDetail>(
-        `/v2/workspaces/${encodeURIComponent(input.workspaceId)}`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            name: input.name,
-            description: input.description,
-          }),
-        },
-      ),
-    );
-  },
-
-  async replaceWorkspaceCompositionMounts(input: ReplaceWorkspaceCompositionMountsInput) {
-    return mapWorkspaceCompositionDetail(
-      await requestJSON<HTTPWorkspaceCompositionDetail>(
-        `/v2/workspaces/${encodeURIComponent(input.workspaceId)}/mounts`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            mounts: input.mounts.map(workspaceCompositionMountToHTTP),
-          }),
-        },
-      ),
-    );
-  },
-
-  async addWorkspaceCompositionMount(input: AddWorkspaceCompositionMountInput) {
-    return mapWorkspaceCompositionDetail(
-      await requestJSON<HTTPWorkspaceCompositionDetail>(
-        `/v2/workspaces/${encodeURIComponent(input.workspaceId)}/mounts`,
-        {
-          method: "POST",
-          body: JSON.stringify(workspaceCompositionMountToHTTP(input.mount)),
-        },
-      ),
-    );
-  },
-
-  async removeWorkspaceCompositionMount(input: RemoveWorkspaceCompositionMountInput) {
-    return mapWorkspaceCompositionDetail(
-      await requestJSON<HTTPWorkspaceCompositionDetail>(
-        `/v2/workspaces/${encodeURIComponent(input.workspaceId)}/mounts/${encodeURIComponent(input.volumeId)}`,
-        { method: "DELETE" },
-      ),
-    );
-  },
-
-  async deleteWorkspaceComposition(workspaceId: string) {
-    await requestJSON<void>(
-      `/v2/workspaces/${encodeURIComponent(workspaceId)}`,
-      { method: "DELETE" },
-    );
-  },
-
   async getWorkspace(databaseId = "", workspaceId: string) {
     try {
       const basePath = workspaceBasePath(databaseId, workspaceId);
@@ -3990,6 +3579,14 @@ const httpAFSClient: AFSClient = {
         ),
       )
       .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt));
+  },
+
+  async forkWorkspace(input: ForkWorkspaceInput) {
+    await requestJSON<void>(`${workspaceBasePath(input.databaseId, input.workspaceId)}:fork`, {
+      method: "POST",
+      body: JSON.stringify({ new_workspace: input.name.trim() }),
+    });
+    return httpAFSClient.getWorkspace(input.databaseId ?? "", input.name.trim());
   },
 
   async createWorkspace(input: CreateWorkspaceInput) {
@@ -4234,10 +3831,12 @@ const httpAFSClient: AFSClient = {
     );
   },
 
-  async createSavepoint() {
-    throw new Error(
-      "Checkpoint creation requires a connected working copy and is not available in the hosted HTTP control plane yet.",
-    );
+  async createSavepoint(input: CreateSavepointInput) {
+    await requestJSON<void>(`${workspaceBasePath(input.databaseId, input.workspaceId)}:save-from-live`, {
+      method: "POST",
+      body: JSON.stringify({ checkpoint_id: input.name.trim(), description: input.note, source: "web", allow_unchanged: true }),
+    });
+    return httpAFSClient.getWorkspace(input.databaseId ?? "", input.workspaceId);
   },
 
   async restoreSavepoint(input: RestoreSavepointInput) {
@@ -4503,27 +4102,6 @@ const httpAFSClient: AFSClient = {
           profile: input.profile,
           scope: input.scope,
           capability: input.capability,
-          expires_at: input.expiresAt,
-          template_slug: input.templateSlug,
-        }),
-      },
-    );
-    return mapHTTPMCPToken(response, { profileFallback: input.profile });
-  },
-
-  async createWorkspaceCompositionAPIKey(input: CreateWorkspaceAPIKeyInput) {
-    const response = await requestJSON<HTTPMCPToken>(
-      `/v2/workspaces/${encodeURIComponent(input.workspaceId)}/api-keys`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          name: input.name,
-          capability: input.capability,
-          profile: input.profile,
-          mount_capabilities: (input.mountCapabilities ?? []).map((mc) => ({
-            volume_id: mc.volumeId,
-            capability: mc.capability,
-          })),
           expires_at: input.expiresAt,
           template_slug: input.templateSlug,
         }),

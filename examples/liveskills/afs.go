@@ -32,7 +32,7 @@ func (shellAFSRunner) Run(args ...string) error {
 		message = err.Error()
 	}
 	if strings.Contains(strings.ToLower(message), "forbidden") {
-		return fail("afs %s failed: %s\nLiveSkills needs AFS permission to create, import, and mount volumes. Run `afs auth login` or `afs setup`, or set LIVESKILLS_AFS_MODE=local to use the local development adapter.", strings.Join(args, " "), message)
+		return fail("afs %s failed: %s\nLiveSkills needs AFS permission to create, import, and mount workspaces. Run `afs auth login` or `afs setup`, or set LIVESKILLS_AFS_MODE=local to use the local development adapter.", strings.Join(args, " "), message)
 	}
 	return fail("afs %s failed: %s", strings.Join(args, " "), message)
 }
@@ -158,7 +158,7 @@ func (a *LocalAFSAdapter) MountSkillVolume(volumeID, checkpointID, mountPoint, s
 				}
 			}
 		}
-		if err := a.Runner.Run("vol", "mount", "--yes", "--session", session, volumeID, mountPoint); err != nil {
+		if err := a.Runner.Run("ws", "mount", "--yes", "--session", session, volumeID, mountPoint); err != nil {
 			if isExistingAFSMount(err, volumeID, mountPoint) {
 				return nil
 			}
@@ -177,7 +177,7 @@ func (a *LocalAFSAdapter) MountSkillVolume(volumeID, checkpointID, mountPoint, s
 		"agent":        agent,
 		"mode":         "local-afs-volume",
 		"mountedAt":    time.Now().UTC().Format(time.RFC3339),
-		"note":         "Local development metadata for a direct AFS volume mount. CLI mode calls: afs vol mount <volume> <directory>.",
+		"note":         "Local development metadata for a AFS workspace mount. CLI mode calls: afs ws mount <workspace> <directory>.",
 	}
 	return writeJSON(filepath.Join(a.Home, "mounts", hashText(mountPoint)+".json"), metadata)
 }
@@ -194,14 +194,14 @@ func (a *LocalAFSAdapter) importStagedCheckpoint(volumeID, checkpointID string) 
 }
 
 func (a *LocalAFSAdapter) importVolumeSnapshot(volumeID, source string) error {
-	err := a.Runner.Run("vol", "import", volumeID, source)
+	err := a.Runner.Run("ws", "import", volumeID, source)
 	if err == nil {
 		return nil
 	}
 	if !isExistingVolumeImportError(err) {
 		return err
 	}
-	return a.Runner.Run("vol", "import", "--force", volumeID, source)
+	return a.Runner.Run("ws", "import", "--force", volumeID, source)
 }
 
 func needsStagedCheckpointImport(err error) bool {

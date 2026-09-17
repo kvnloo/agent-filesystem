@@ -241,76 +241,23 @@ func TestHTTPBrowseAndRestore(t *testing.T) {
 	}
 }
 
-func TestHTTPV2VolumesAndWorkspaceCompositions(t *testing.T) {
-	t.Helper()
-
+func TestHTTPCompositionRoutesRetired(t *testing.T) {
 	manager, _ := newTestManager(t)
 	server := httptest.NewServer(NewHandler(manager, "*"))
 	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/v2/volumes")
-	if err != nil {
-		t.Fatalf("GET /v2/volumes returned error: %v", err)
-	}
-	defer resp.Body.Close()
-	var volumes workspaceListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&volumes); err != nil {
-		t.Fatalf("Decode(/v2/volumes) returned error: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /v2/volumes status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	if len(volumes.Items) != 1 || volumes.Items[0].Name != "repo" {
-		t.Fatalf("/v2/volumes items = %#v, want repo volume", volumes.Items)
-	}
-
-	createBody := `{"name":"review","mounts":[{"volume_id":"` + volumes.Items[0].ID + `","mount_path":"/repo","readonly":true}]}`
-	resp, err = http.Post(server.URL+"/v2/workspaces", "application/json", strings.NewReader(createBody))
-	if err != nil {
-		t.Fatalf("POST /v2/workspaces returned error: %v", err)
-	}
-	defer resp.Body.Close()
-	var workspace workspaceCompositionDetail
-	if err := json.NewDecoder(resp.Body).Decode(&workspace); err != nil {
-		t.Fatalf("Decode(/v2/workspaces create) returned error: %v", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST /v2/workspaces status = %d, want %d", resp.StatusCode, http.StatusCreated)
-	}
-	if workspace.ID == "" || workspace.Name != "review" || len(workspace.Mounts) != 1 {
-		t.Fatalf("workspace composition = %#v, want one mounted volume", workspace)
-	}
-	if !workspace.Mounts[0].Readonly || workspace.Mounts[0].MountPath != "/repo" {
-		t.Fatalf("workspace mount = %#v, want readonly /repo", workspace.Mounts[0])
-	}
-
-	resp, err = http.Post(server.URL+"/v2/workspaces/review/bookmarks", "application/json", strings.NewReader(`{"name":"start"}`))
-	if err != nil {
-		t.Fatalf("POST /v2/workspaces/review/bookmarks returned error: %v", err)
-	}
-	defer resp.Body.Close()
-	var bookmark workspaceBookmark
-	if err := json.NewDecoder(resp.Body).Decode(&bookmark); err != nil {
-		t.Fatalf("Decode(bookmark) returned error: %v", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST bookmark status = %d, want %d", resp.StatusCode, http.StatusCreated)
-	}
-	if bookmark.Name != "start" || len(bookmark.Volumes) != 1 || bookmark.Volumes[0].CheckpointID == "" {
-		t.Fatalf("bookmark = %#v, want one captured volume checkpoint", bookmark)
-	}
-
-	resp, err = http.Get(server.URL + "/v2/workspaces")
-	if err != nil {
-		t.Fatalf("GET /v2/workspaces returned error: %v", err)
-	}
-	defer resp.Body.Close()
-	var workspaces workspaceCompositionListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&workspaces); err != nil {
-		t.Fatalf("Decode(/v2/workspaces) returned error: %v", err)
-	}
-	if len(workspaces.Items) != 1 || workspaces.Items[0].Name != "review" || workspaces.Items[0].MountCount != 1 {
-		t.Fatalf("/v2/workspaces items = %#v, want review with one mount", workspaces.Items)
+	for _, path := range []string{"/v2/volumes", "/v2/volumes/repo", "/v2/volumes:import", "/v2/workspaces", "/v2/workspaces/repo", "/v2/workspaces/repo/mounts", "/v2/workspaces/repo/bookmarks"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete} {
+			req, _ := http.NewRequest(method, server.URL+path, strings.NewReader(`{}`))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusGone || !strings.Contains(string(body), "composition_model_retired") {
+				t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, body)
+			}
+		}
 	}
 }
 
@@ -1565,8 +1512,8 @@ func TestHostedControlPlaneTokenCanIssueWorkspaceTokenWithoutAuth(t *testing.T) 
 	if got := issuePayload.Result.StructuredContent["profile"]; got != MCPProfileWorkspaceRW {
 		t.Fatalf("mcp_token_issue profile = %#v, want %q", got, MCPProfileWorkspaceRW)
 	}
-	if got, _ := issuePayload.Result.StructuredContent["scope"].(string); !strings.HasPrefix(got, mcpScopeVolumePrefix) {
-		t.Fatalf("mcp_token_issue scope = %#v, want volume scope", issuePayload.Result.StructuredContent["scope"])
+	if got, _ := issuePayload.Result.StructuredContent["scope"].(string); !strings.HasPrefix(got, mcpScopeWorkspacePrefix) {
+		t.Fatalf("mcp_token_issue scope = %#v, want workspace scope", issuePayload.Result.StructuredContent["scope"])
 	}
 	if got := issuePayload.Result.StructuredContent["capability"]; got != MCPCapabilityRW {
 		t.Fatalf("mcp_token_issue capability = %#v, want %q", got, MCPCapabilityRW)
@@ -2844,6 +2791,12 @@ func newTestManager(t *testing.T) (*DatabaseManager, string) {
 	}
 	if err := store.MoveWorkspaceHead(ctx, "repo", "snapshot", now); err != nil {
 		t.Fatalf("MoveWorkspaceHead() returned error: %v", err)
+	}
+
+	// Fixtures explicitly publish the checkpoint tree. Read handlers never
+	// hydrate or replace a live root as a side effect.
+	if err := SyncWorkspaceRoot(ctx, store, "repo", manifestValue); err != nil {
+		t.Fatalf("publish fixture root: %v", err)
 	}
 
 	dir := t.TempDir()

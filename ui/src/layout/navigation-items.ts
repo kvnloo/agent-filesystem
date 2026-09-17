@@ -2,7 +2,6 @@ import type { IconType } from "@redis-ui/icons";
 import {
   BellIcon,
   BookOpenIcon,
-  BotIcon,
   CloudDownloadIcon,
   DatabaseIcon,
   FoldersIcon,
@@ -41,8 +40,7 @@ export type NavigationTitleParts = {
 
 export const navigationItems: ReadonlyArray<NavigationItem> = [
   { kind: "route", label: "Monitor", path: "/", icon: PieChartIcon, title: "Monitor" },
-  { kind: "route", label: "Workspaces", path: "/workspaces", icon: BotIcon },
-  { kind: "route", label: "Volumes", path: "/volumes", icon: FoldersIcon },
+  { kind: "route", label: "Workspaces", path: "/workspaces", icon: FoldersIcon },
   { kind: "route", label: "API Keys", path: "/api-keys", icon: KeyIcon },
   { kind: "route", label: "Databases", path: "/databases", icon: DatabaseIcon },
   {
@@ -118,11 +116,7 @@ export function resolveNavigationTitleParts(pathname: string): NavigationTitlePa
   }
 
   if (pathname.startsWith("/workspaces")) {
-    return { page: "Agent Workspaces", subtitle: "Create, manage, and edit Agent Workspaces." };
-  }
-
-  if (pathname.startsWith("/volumes")) {
-    return { page: "Volumes", subtitle: "Shared folders accessible to agent workspaces" };
+    return { page: "Workspaces", subtitle: "Manage file trees, checkpoints, and workspace access." };
   }
 
   if (pathname.startsWith("/agents")) {

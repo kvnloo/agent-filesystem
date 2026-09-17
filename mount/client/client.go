@@ -50,3 +50,14 @@ func NewWithObserver(rdb *redis.Client, key string, observer MutationObserver) C
 func NewWithCacheAndObserver(rdb *redis.Client, key string, ttl time.Duration, observer MutationObserver) Client {
 	return internal.NewWithCacheAndObserver(rdb, key, ttl, observer)
 }
+
+var ErrWriteConflict = internal.ErrWriteConflict
+var ErrWorkspaceChanged = internal.ErrWorkspaceChanged
+var ErrGenerationRequired = internal.ErrGenerationRequired
+
+func WithExpectedStat(ctx context.Context, stat *StatResult) context.Context {
+	return internal.WithExpectedStat(ctx, stat)
+}
+func WithWorkspaceGeneration(ctx context.Context, generation string) context.Context {
+	return internal.WithWorkspaceGeneration(ctx, generation)
+}

@@ -33,12 +33,12 @@ const afs = new AFS({ apiKey: process.env.AFS_API_KEY });
 const workspace = await afs.workspace.create({ name: "foobar" });
 
 const fs = await afs.fs.mount({
-  workspaces: [{ name: workspace.name }],
+  workspace: workspace.name,
   mode: "rw",
 });
 
 await fs.writeFile("/src/README.md", "hello world");
-const result = await fs.bash().exec("cat /foobar/src/README.md");
+const result = await fs.bash().exec("cat src/README.md");
 console.log(result.stdout);
 await fs.close();
 ```
@@ -59,27 +59,27 @@ afs = AFS(api_key=os.environ["AFS_API_KEY"])
 workspace = afs.workspace.create(name="foobar")
 
 fs = afs.fs.mount(
-    workspaces=[{"name": workspace["name"]}],
+    workspace=workspace["name"],
     mode="rw",
 )
 
 fs.write_file("/src/README.md", "hello world")
-result = fs.bash().exec("cat /foobar/src/README.md")
+result = fs.bash().exec("cat src/README.md")
 print(result.stdout)
 fs.close()
 ```
 
 ## Mount Semantics
 
-`fs.mount()` creates an isolated SDK mount, not a kernel FUSE/NFS mount. For
-one mounted workspace, `/path/to/file` is treated as workspace-relative. For
-multiple workspaces, use `/<workspace-name>/path/to/file`.
+`fs.mount()` opens one workspace through MCP. File API paths such as
+`/path/to/file` resolve directly within that workspace. It is not a kernel
+FUSE/NFS mount.
 
-`bash().exec()` materializes each workspace into a temporary local directory,
-rewrites absolute workspace paths such as `/foobar/src/README.md` to that
-isolated directory, runs the shell command, then writes created and modified
-files back through MCP. The current alpha sync path supports file create/update;
-remote file deletion is waiting on a dedicated hosted file-delete API.
+`bash().exec()` materializes the workspace tree into one temporary directory,
+runs the shell command there, then writes created and modified files back
+through MCP. Use relative shell paths such as `src/README.md`. The current alpha sync path supports file create/update;
+use `delete()` for explicit remote deletion. Local deletion is not automatically
+propagated by the sync helper.
 
 ## Test Locally
 

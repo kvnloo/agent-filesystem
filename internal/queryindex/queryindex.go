@@ -160,8 +160,11 @@ func QueueMarkDirty(ctx context.Context, pipe redis.Pipeliner, fsKey, inodeID st
 	if inodeID == "" {
 		return
 	}
-	pipe.HSet(ctx, InodeKey(fsKey, inodeID), StaleFields())
-	pipe.SAdd(ctx, DirtySetKey(fsKey), inodeID)
+	args := []interface{}{inodeID}
+	for key, value := range StaleFields() {
+		args = append(args, key, value)
+	}
+	markExistingDirty.Eval(ctx, pipe, []string{InodeKey(fsKey, inodeID), DirtySetKey(fsKey)}, args...)
 }
 
 func QueueMarkDeleted(ctx context.Context, pipe redis.Pipeliner, fsKey, inodeID string) {
@@ -292,7 +295,8 @@ func ProcessPending(ctx context.Context, rdb *redis.Client, fsKey string, limit 
 		item, err := ReindexFile(ctx, rdb, fsKey, inodeID)
 		if err != nil {
 			result.Errors++
-			_ = rdb.HSet(ctx, InodeKey(fsKey, inodeID), "query_state", StateError, "query_error", err.Error()).Err()
+			// Leave the ID pending: a concurrent publication may have superseded it.
+			// Never recreate an inode just to record a projection error.
 			continue
 		}
 		result.Processed++
@@ -443,10 +447,10 @@ func EnqueueFiles(ctx context.Context, rdb *redis.Client, fsKey, scopePath strin
 	err := scanFiles(ctx, rdb, fsKey, scopePath, func(fields map[string]string) error {
 		state := strings.TrimSpace(fields["query_state"])
 		version := strings.TrimSpace(fields["query_index_version"])
-		if !force && state == StateReady && version == ProjectionVersion {
+		if !force && state == StateReady && version == ProjectionVersion && fields["query_revision"] == fields["revision"] && fields["query_path"] == fields["path"] {
 			return nil
 		}
-		QueueMarkDirty(ctx, pipe, fsKey, strings.TrimSpace(fields["id"]))
+		pipe.SAdd(ctx, DirtySetKey(fsKey), strings.TrimSpace(fields["id"]))
 		count++
 		queued += 2
 		if queued >= 1000 {
@@ -471,18 +475,31 @@ func ReindexFile(ctx context.Context, rdb *redis.Client, fsKey, inodeID string) 
 	if inodeID == "" {
 		return ReindexResult{}, errors.New("missing inode id")
 	}
+	generation, err := rdb.Get(ctx, generationKey(fsKey)).Result()
+	if err != nil && err != redis.Nil {
+		return ReindexResult{}, err
+	}
+	if generation != "" && !strings.HasPrefix(generation, "g_") {
+		return ReindexResult{}, ErrProjectionStale
+	}
 	inodeKey := InodeKey(fsKey, inodeID)
 	values, err := rdb.HMGet(ctx, inodeKey,
-		"type", "path", "path_ancestors", "content_ref", "size", "content",
+		"type", "path", "path_ancestors", "content_ref", "size", "content", "revision",
 	).Result()
 	if err != nil {
 		return ReindexResult{}, err
 	}
+	expected := projectionObservation{generation: generation}
+	if len(values) >= 7 {
+		expected.kind = redisString(values[0])
+		expected.path = redisString(values[1])
+		expected.revision = redisString(values[6])
+	}
+	ctx = context.WithValue(ctx, projectionObservationKey{}, expected)
 	if len(values) == 0 || values[0] == nil {
 		if err := cleanupChunks(ctx, rdb, fsKey, inodeID); err != nil {
 			return ReindexResult{}, err
 		}
-		_ = rdb.SRem(ctx, DirtySetKey(fsKey), inodeID).Err()
 		return ReindexResult{InodeID: inodeID, State: StateSkipped, Reason: SkipMissing}, nil
 	}
 	kind := redisString(values[0])
@@ -675,6 +692,9 @@ func Search(ctx context.Context, rdb *redis.Client, fsKey string, spec SearchSpe
 func EnsureReady(ctx context.Context, rdb *redis.Client, fsKey, scopePath string, candidateLimit int) error {
 	if rdb == nil {
 		return ErrSearchUnavailable
+	}
+	if err := ReconcilePublications(ctx, rdb, fsKey); err != nil {
+		return err
 	}
 	pending, err := PendingCount(ctx, rdb, fsKey)
 	if err != nil {
@@ -981,41 +1001,40 @@ func replaceChunks(ctx context.Context, rdb *redis.Client, fsKey, inodeID string
 	if err != nil {
 		return err
 	}
-	pipe := rdb.Pipeline()
-	if len(oldKeys) > 0 {
-		pipe.Del(ctx, oldKeys...)
-	}
-	pipe.Del(ctx, ChunkSetKey(fsKey, inodeID))
-	for _, chunk := range chunks {
-		pipe.HSet(ctx, chunk.Key, map[string]interface{}{
-			"type":           "chunk",
-			"path":           chunk.Path,
-			"path_ancestors": IndexedPathAncestors(chunk.Path),
-			"inode_id":       chunk.InodeID,
-			"content_hash":   chunk.ContentHash,
-			"seq":            chunk.Seq,
-			"start_line":     chunk.StartLine,
-			"end_line":       chunk.EndLine,
-			"text":           chunk.Text,
-			"preview":        chunk.Preview,
+	return guardedProjection(ctx, rdb, fsKey, inodeID, func(pipe redis.Pipeliner) error {
+		if len(oldKeys) > 0 {
+			pipe.Del(ctx, oldKeys...)
+		}
+		pipe.Del(ctx, ChunkSetKey(fsKey, inodeID))
+		for _, chunk := range chunks {
+			pipe.HSet(ctx, chunk.Key, map[string]interface{}{
+				"type":           "chunk",
+				"path":           chunk.Path,
+				"path_ancestors": IndexedPathAncestors(chunk.Path),
+				"inode_id":       chunk.InodeID,
+				"content_hash":   chunk.ContentHash,
+				"seq":            chunk.Seq,
+				"start_line":     chunk.StartLine,
+				"end_line":       chunk.EndLine,
+				"text":           chunk.Text,
+				"preview":        chunk.Preview,
+			})
+			pipe.SAdd(ctx, ChunkSetKey(fsKey, inodeID), chunk.Key)
+		}
+		pipe.HSet(ctx, InodeKey(fsKey, inodeID), map[string]interface{}{
+			"query_revision":      ctx.Value(projectionObservationKey{}).(projectionObservation).revision,
+			"query_path":          ctx.Value(projectionObservationKey{}).(projectionObservation).path,
+			"query_state":         StateReady,
+			"query_index_version": ProjectionVersion,
+			"query_skip_reason":   "",
+			"query_error":         "",
+			"query_content_hash":  hash,
+			"query_chunk_count":   len(chunks),
+			"query_indexed_at_ms": time.Now().UTC().UnixMilli(),
 		})
-		pipe.SAdd(ctx, ChunkSetKey(fsKey, inodeID), chunk.Key)
-	}
-	pipe.HSet(ctx, InodeKey(fsKey, inodeID), map[string]interface{}{
-		"query_state":         StateReady,
-		"query_index_version": ProjectionVersion,
-		"query_skip_reason":   "",
-		"query_error":         "",
-		"query_content_hash":  hash,
-		"query_chunk_count":   len(chunks),
-		"query_indexed_at_ms": time.Now().UTC().UnixMilli(),
-	})
-	pipe.SRem(ctx, DirtySetKey(fsKey), inodeID)
-	_, err = pipe.Exec(ctx)
-	if errors.Is(err, redis.Nil) {
+		pipe.SRem(ctx, DirtySetKey(fsKey), inodeID)
 		return nil
-	}
-	return err
+	})
 }
 
 func cleanupChunks(ctx context.Context, rdb *redis.Client, fsKey, inodeID string) error {
@@ -1023,35 +1042,34 @@ func cleanupChunks(ctx context.Context, rdb *redis.Client, fsKey, inodeID string
 	if err != nil {
 		return err
 	}
-	pipe := rdb.Pipeline()
-	if len(oldKeys) > 0 {
-		pipe.Del(ctx, oldKeys...)
-	}
-	pipe.Del(ctx, ChunkSetKey(fsKey, inodeID))
-	_, err = pipe.Exec(ctx)
-	if errors.Is(err, redis.Nil) {
+	return guardedProjection(ctx, rdb, fsKey, inodeID, func(pipe redis.Pipeliner) error {
+		if len(oldKeys) > 0 {
+			pipe.Del(ctx, oldKeys...)
+		}
+		pipe.Del(ctx, ChunkSetKey(fsKey, inodeID))
+		if ctx.Value(projectionObservationKey{}).(projectionObservation).kind == "" {
+			pipe.SRem(ctx, DirtySetKey(fsKey), inodeID)
+		}
 		return nil
-	}
-	return err
+	})
 }
 
 func markSkipped(ctx context.Context, rdb *redis.Client, fsKey, inodeID, filePath, reason string) error {
-	pipe := rdb.Pipeline()
-	pipe.HSet(ctx, InodeKey(fsKey, inodeID), map[string]interface{}{
-		"query_state":         StateSkipped,
-		"query_index_version": ProjectionVersion,
-		"query_skip_reason":   reason,
-		"query_error":         "",
-		"query_content_hash":  "",
-		"query_chunk_count":   0,
-		"query_indexed_at_ms": time.Now().UTC().UnixMilli(),
-	})
-	pipe.SRem(ctx, DirtySetKey(fsKey), inodeID)
-	_, err := pipe.Exec(ctx)
-	if errors.Is(err, redis.Nil) {
+	return guardedProjection(ctx, rdb, fsKey, inodeID, func(pipe redis.Pipeliner) error {
+		pipe.HSet(ctx, InodeKey(fsKey, inodeID), map[string]interface{}{
+			"query_revision":      ctx.Value(projectionObservationKey{}).(projectionObservation).revision,
+			"query_path":          ctx.Value(projectionObservationKey{}).(projectionObservation).path,
+			"query_state":         StateSkipped,
+			"query_index_version": ProjectionVersion,
+			"query_skip_reason":   reason,
+			"query_error":         "",
+			"query_content_hash":  "",
+			"query_chunk_count":   0,
+			"query_indexed_at_ms": time.Now().UTC().UnixMilli(),
+		})
+		pipe.SRem(ctx, DirtySetKey(fsKey), inodeID)
 		return nil
-	}
-	return err
+	})
 }
 
 func scanDirtyInodes(ctx context.Context, rdb *redis.Client, fsKey string, limit int) ([]string, error) {

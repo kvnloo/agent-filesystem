@@ -55,24 +55,11 @@ function keyScopeKind(key: APIKey): "control-plane" | "workspace" {
   return "workspace";
 }
 
-/**
- * Summarizes the capability column for the table + detail view. If the key
- * carries per-mount overrides and they're not all identical, we render "Mixed"
- * — the detail panel exposes the per-mount breakdown.
- */
+/** Summarizes the capability for this workspace or control-plane key. */
 function summarizeCapability(
   key: APIKey,
   profile?: AFSMCPProfile,
 ): string {
-  if (key.kind === "mcp" && key.mountCapabilities && key.mountCapabilities.length > 0) {
-    const unique = new Set(
-      key.mountCapabilities.map((mc) => mc.capability),
-    );
-    if (unique.size === 1) {
-      return formatCapability(key.mountCapabilities[0].capability, profile);
-    }
-    return "Mixed";
-  }
   return formatCapability(key.capability, profile);
 }
 
@@ -229,25 +216,6 @@ function APIKeyDetailDialog({
                   <DetailValue>{databaseName || "—"}</DetailValue>
                 </DetailField>
               </>
-            ) : null}
-            {apiKey.kind === "mcp" &&
-            apiKey.mountCapabilities &&
-            apiKey.mountCapabilities.length > 0 ? (
-              <DetailField style={{ gridColumn: "1 / -1" }}>
-                <DetailLabel>Per-volume access</DetailLabel>
-                <MountAccessTable>
-                  <tbody>
-                    {apiKey.mountCapabilities.map((mc) => (
-                      <MountAccessRow key={mc.volumeId}>
-                        <MountAccessVolume>{mc.volumeId}</MountAccessVolume>
-                        <MountAccessCap>
-                          {formatCapability(mc.capability, undefined)}
-                        </MountAccessCap>
-                      </MountAccessRow>
-                    ))}
-                  </tbody>
-                </MountAccessTable>
-              </DetailField>
             ) : null}
             <DetailField>
               <DetailLabel>Created</DetailLabel>
@@ -425,7 +393,7 @@ function buildMCPSnippet({
 }) {
   const serverName = controlPlane
     ? "agent-filesystem"
-    : `afs-${(workspaceName || "volume").trim()}`;
+    : `afs-${(workspaceName || "workspace").trim()}`;
   return JSON.stringify(
     {
       mcpServers: {
@@ -831,34 +799,6 @@ const DetailValue = styled.span`
   color: var(--afs-ink, #18181b);
   font-size: 14px;
   word-break: break-all;
-`;
-
-const MountAccessTable = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 6px;
-`;
-
-const MountAccessRow = styled.tr`
-  & + & {
-    border-top: 1px dashed var(--afs-line);
-  }
-`;
-
-const MountAccessVolume = styled.td`
-  padding: 8px 12px 8px 0;
-  font-family: var(--afs-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  color: var(--afs-ink);
-  vertical-align: top;
-`;
-
-const MountAccessCap = styled.td`
-  padding: 8px 0;
-  font-size: 13px;
-  color: var(--afs-ink);
-  text-align: right;
-  vertical-align: top;
 `;
 
 const NameCell = styled.div`

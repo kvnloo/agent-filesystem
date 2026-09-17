@@ -513,7 +513,7 @@ func startSyncMount(ctx context.Context, cfg config, selection workspaceSelectio
 		entryCount = strconv.Itoa(live) + " entries"
 	}
 	rows := []outputRow{
-		{Label: "volume", Value: bootstrap.workspace},
+		{Label: "workspace", Value: bootstrap.workspace},
 		{Label: "path", Value: homeRelativeDisplayPath(localRoot)},
 		{Label: "mode", Value: "sync"},
 		{Label: "files", Value: entryCount},
@@ -521,19 +521,19 @@ func startSyncMount(ctx context.Context, cfg config, selection workspaceSelectio
 	if runtimeCfg.ReadOnly {
 		rows = append(rows, outputRow{Label: "readonly", Value: "yes"})
 	}
-	rows = append(rows, outputRow{Label: "unmount", Value: filepath.Base(os.Args[0]) + " vol unmount " + shellQuote(bootstrap.workspace)})
+	rows = append(rows, outputRow{Label: "unmount", Value: filepath.Base(os.Args[0]) + " ws unmount " + shellQuote(bootstrap.workspace)})
 	if opts.verbose && strings.TrimSpace(bootstrap.sessionID) != "" {
 		rows = append(rows, outputRow{Label: "session", Value: strings.TrimSpace(bootstrap.sessionID)})
 	}
 	if !opts.quiet {
-		printSection("Volume mounted", rows)
+		printSection("Workspace mounted", rows)
 	}
 	return nil
 }
 
 func printEmptyLocalDeleteWarning(workspace, localRoot string, plan mountReconcilePlan) {
 	printSection("Empty local folder", []outputRow{
-		{Label: "volume", Value: workspace},
+		{Label: "workspace", Value: workspace},
 		{Label: "path", Value: homeRelativeDisplayPath(localRoot)},
 		{Label: "remote entries", Value: fmt.Sprintf("%d", plan.RemoteCount)},
 		{Label: "would delete", Value: fmt.Sprintf("%d remote entries", plan.DeleteRemoteCount)},
@@ -577,21 +577,21 @@ func promptMountSelection(opts mountOptions) error {
 	choices := mountPromptChoices(reg, workspaces.Items)
 	if len(choices) == 0 {
 		fmt.Println()
-		fmt.Println("Mount volume")
+		fmt.Println("Mount workspace")
 		fmt.Println()
-		fmt.Println("No volumes found.")
-		fmt.Println("Create one with: " + filepath.Base(os.Args[0]) + " vol create <volume>")
+		fmt.Println("No workspaces found.")
+		fmt.Println("Create one with: " + filepath.Base(os.Args[0]) + " ws create <workspace>")
 		fmt.Println()
 		return nil
 	}
 
 	fmt.Println()
-	fmt.Println("Mount volume")
+	fmt.Println("Mount workspace")
 	fmt.Println()
-	headers := []string{"#", "Volume", "Volume ID", "Database", "Status", "Path"}
+	headers := []string{"#", "Workspace", "Workspace ID", "Database", "Status", "Path"}
 	printPlainTable(headers, mountPromptRows(choices))
 	fmt.Println()
-	fmt.Print("Volume to mount: ")
+	fmt.Print("Workspace to mount: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	raw, err := reader.ReadString('\n')
@@ -613,8 +613,8 @@ func promptMountSelection(opts mountOptions) error {
 	}
 	selected := choices[idx-1]
 	if selected.Mounted {
-		printSection("Volume already mounted", []outputRow{
-			{Label: "volume", Value: selected.Workspace},
+		printSection("Workspace already mounted", []outputRow{
+			{Label: "workspace", Value: selected.Workspace},
 			{Label: "path", Value: homeRelativeDisplayPath(selected.Path)},
 		})
 		return nil
@@ -891,19 +891,19 @@ func promptUnmountSelection(deleteLocal bool) error {
 	}
 	if len(reg.Mounts) == 0 {
 		fmt.Println()
-		fmt.Println("No mounted volumes.")
+		fmt.Println("No mounted workspaces.")
 		fmt.Println()
 		return nil
 	}
 
 	records := sortedMountRecords(reg.Mounts)
 	fmt.Println()
-	fmt.Println("Unmount volume")
+	fmt.Println("Unmount workspace")
 	fmt.Println()
-	headers := []string{"#", "Volume", "Path"}
+	headers := []string{"#", "Workspace", "Path"}
 	printPlainTable(headers, unmountPromptRows(records))
 	fmt.Println()
-	fmt.Print("Volume to unmount: ")
+	fmt.Print("Workspace to unmount: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	raw, err := reader.ReadString('\n')
@@ -1088,8 +1088,8 @@ func printUnmountResult(rec mountRecord, deleteLocal bool) {
 			}
 		}
 	}
-	printSection("Volume unmounted", []outputRow{
-		{Label: "volume", Value: rec.Workspace},
+	printSection("Workspace unmounted", []outputRow{
+		{Label: "workspace", Value: rec.Workspace},
 		{Label: "path", Value: homeRelativeDisplayPath(rec.LocalPath)},
 		{Label: label, Value: local},
 	})
@@ -1129,10 +1129,10 @@ func countMountableLocalEntries(root string) (int, error) {
 
 func mountUsageText(bin string) string {
 	return brandHeaderString() + fmt.Sprintf(`Usage:
-  %s vol mount [--dry-run] [--yes] [--readonly] [--verbose] [--session <name>] [<volume> [directory]]
+  %s ws mount [--dry-run] [--yes] [--readonly] [--verbose] [--session <name>] [<workspace> [directory]]
 
-Mount a volume to a local directory using sync mode.
-With no volume, lists volumes and prompts for a selection.
+Mount a workspace to a local directory using sync mode.
+With no workspace, lists workspaces and prompts for a selection.
 With no directory, prompts for a local folder.
 Use --readonly to make this mount refuse local writes.
 Use --session to name this mount session separately from agent.name.
@@ -1148,10 +1148,10 @@ The directory is preserved on unmount unless --delete is used.
 
 func unmountUsageText(bin string) string {
 	return brandHeaderString() + fmt.Sprintf(`Usage:
-  %s vol unmount [--delete] [<volume|directory>]
+  %s ws unmount [--delete] [<workspace|directory>]
 
-Unmount an AFS volume by volume name, volume ID, or local directory.
-With no target, lists mounted volumes and prompts for a selection.
+Unmount an AFS workspace by workspace name, workspace ID, or local directory.
+With no target, lists mounted workspaces and prompts for a selection.
 By default, the local folder is preserved. Use --delete only when you want to
 remove the local directory after the daemon stops.
 `, bin)

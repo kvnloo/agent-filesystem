@@ -139,60 +139,56 @@ class FakeMountedMCPHttpClient:
 class MountedFSTest(unittest.TestCase):
     def test_single_workspace_paths_are_workspace_relative(self):
         fake = FakeMCP()
-        fs = MountedFS([_MountedWorkspace(name="foobar", token="token", client=fake)])
+        fs = MountedFS(_MountedWorkspace(name="foobar", token="token", client=fake))
 
         fs.write_file("/src/README.md", "hello")
 
         self.assertEqual(fake.files["/src/README.md"], "hello")
-        self.assertEqual(fs.read_file("/foobar/src/README.md"), "hello")
-        self.assertEqual(fs.workspace_names, ["foobar"])
+        self.assertEqual(fs.read_file("/src/README.md"), "hello")
+        self.assertEqual(fs.workspace_name, "foobar")
 
     def test_delete_removes_file_and_calls_file_delete(self):
         fake = FakeMCP()
-        fs = MountedFS([_MountedWorkspace(name="foobar", token="token", client=fake)])
+        fs = MountedFS(_MountedWorkspace(name="foobar", token="token", client=fake))
 
         fs.write_file("/src/README.md", "hello")
-        result = fs.delete("/foobar/src/README.md")
+        result = fs.delete("/src/README.md")
 
         self.assertEqual(result, {"operation": "delete", "kind": "file"})
         self.assertNotIn("/src/README.md", fake.files)
         delete_paths = [args["path"] for name, args in fake.calls if name == "file_delete"]
         self.assertEqual(delete_paths, ["/src/README.md"])
 
-    def test_multi_workspace_requires_workspace_prefix(self):
-        fs = MountedFS(
-            [
-                _MountedWorkspace(name="api", token="token", client=FakeMCP()),
-                _MountedWorkspace(name="web", token="token", client=FakeMCP()),
-            ]
-        )
-
+    def test_rejects_multiple_workspace_mounts(self):
         with self.assertRaises(AFSError):
-            fs.write_file("/README.md", "hello")
+            MountedFS([_MountedWorkspace(name="a", token="t", client=FakeMCP()), _MountedWorkspace(name="b", token="t", client=FakeMCP())])
 
-    def test_maps_absolute_workspace_paths_after_materialization(self):
+    def test_materialization_uses_the_local_root_directly(self):
         fake = FakeMCP()
         fake.files["/README.md"] = "hello"
-        fs = MountedFS([_MountedWorkspace(name="foobar", token="token", client=fake)])
+        fs = MountedFS(_MountedWorkspace(name="foobar", token="token", client=fake))
         self.addCleanup(fs.close)
         root = fs.sync_from_remote()
+        self.assertEqual(Path(root, "README.md").read_text(), "hello")
+        self.assertFalse(Path(root, "foobar").exists())
 
-        mapped = fs.map_absolute_workspace_paths("cat /foobar/README.md")
-
-        self.assertIn(root, mapped)
-        self.assertNotEqual(mapped, "cat /foobar/README.md")
+    def test_workspace_name_is_a_real_directory_name(self):
+        fake = FakeMCP()
+        fs = MountedFS(_MountedWorkspace(name="repo", token="t", client=fake))
+        fs.write_file("/repo/file.txt", "nested")
+        self.assertEqual(fake.files["/repo/file.txt"], "nested")
 
     def test_fs_mount_issues_workspace_token_and_reads_and_writes_files(self):
         control_plane = FakeControlPlane()
 
         with patch("redis_afs.client.MCPHttpClient", FakeMountedMCPHttpClient):
-            fs = FSClient(control_plane).mount(workspaces=[{"name": "repo"}], mode="rw", token_name="Mounted FS")
+            fs = FSClient(control_plane).mount(workspace="repo", mode="rw", token_name="Mounted FS")
             self.addCleanup(fs.close)
 
-            fs.write_file("/repo/README.md", "hello from mounted fs")
+            fs.write_file("/README.md", "hello from mounted fs")
 
-            self.assertEqual(fs.read_file("/repo/README.md"), "hello from mounted fs")
-            self.assertEqual(fs.workspace_names, ["repo"])
+            self.assertEqual(fs.read_file("/README.md"), "hello from mounted fs")
+            self.assertEqual(fs.workspace_name, "repo")
             self.assertEqual(control_plane.issued[0]["arguments"]["workspace"], "repo")
             self.assertEqual(control_plane.issued[0]["arguments"]["profile"], "workspace-rw")
             self.assertEqual(control_plane.issued[0]["arguments"]["name"], "Mounted FS")
@@ -201,11 +197,11 @@ class MountedFSTest(unittest.TestCase):
         fake = FakeMCP()
         fake.files["/README.md"] = "hello"
         fake.symlinks["/readme-link.md"] = "README.md"
-        fs = MountedFS([_MountedWorkspace(name="repo", token="token", client=fake)])
+        fs = MountedFS(_MountedWorkspace(name="repo", token="token", client=fake))
         self.addCleanup(fs.close)
 
         root = fs.sync_from_remote()
-        self.assertTrue(Path(root, "repo", "readme-link.md").is_symlink())
+        self.assertTrue(Path(root, "readme-link.md").is_symlink())
 
         fs.sync_to_remote()
 
@@ -214,14 +210,14 @@ class MountedFSTest(unittest.TestCase):
 
     def test_sync_to_remote_skips_symlinked_directories(self):
         fake = FakeMCP()
-        fs = MountedFS([_MountedWorkspace(name="repo", token="token", client=fake)])
+        fs = MountedFS(_MountedWorkspace(name="repo", token="token", client=fake))
         self.addCleanup(fs.close)
 
         root = Path(fs.sync_from_remote())
         external = root / "external"
         external.mkdir()
         Path(external, "secret.txt").write_text("do not upload", encoding="utf-8")
-        Path(root, "repo", "external-link").symlink_to(external, target_is_directory=True)
+        Path(root, "external-link").symlink_to(external, target_is_directory=True)
 
         fs.sync_to_remote()
 

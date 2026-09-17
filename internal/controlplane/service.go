@@ -396,6 +396,9 @@ type WorkspaceSessionInfo = workspaceSessionInfo
 type WorkspaceSessionListResponse = workspaceSessionListResponse
 
 type SaveCheckpointRequest struct {
+	ExpectedGeneration    string
+	ExpectedChangesID     string
+	ImportLockToken       string
 	Workspace             string
 	ExpectedHead          string
 	CheckpointID          string
@@ -414,12 +417,14 @@ type SaveCheckpointRequest struct {
 }
 
 type SaveCheckpointFromLiveOptions struct {
-	Description    string
-	Kind           string
-	Source         string
-	Author         string
-	CreatedBy      string
-	AllowUnchanged bool
+	expectedGeneration string
+	importLockToken    string
+	Description        string
+	Kind               string
+	Source             string
+	Author             string
+	CreatedBy          string
+	AllowUnchanged     bool
 }
 
 type workspaceUsageStats struct {
@@ -581,6 +586,14 @@ func (s *Service) saveCheckpointFromLive(ctx context.Context, workspace, checkpo
 	}
 	storageID := workspaceStorageID(meta)
 
+	generation := options.expectedGeneration
+	if generation == "" {
+		generation, err = s.WorkspaceGeneration(ctx, storageID)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	// Check dirty state — if the workspace root is known-clean, skip.
 	if dirty, known, err := WorkspaceRootDirtyState(ctx, s.store, storageID); err != nil {
 		return false, fmt.Errorf("save-from-live dirty state: %w", err)
@@ -593,13 +606,27 @@ func (s *Service) saveCheckpointFromLive(ctx context.Context, workspace, checkpo
 		return false, fmt.Errorf("save-from-live ensure workspace root %q (head=%q): %w", workspace, meta.HeadSavepoint, err)
 	}
 
+	changes, err := latestWorkspaceChange(ctx, s.store.rdb, storageID)
+	if err != nil {
+		return false, err
+	}
 	// Build manifest from the live workspace root.
 	manifest, blobs, fileCount, dirCount, totalBytes, err := BuildManifestFromWorkspaceRoot(ctx, s.store.rdb, storageID, checkpointID)
 	if err != nil {
 		return false, fmt.Errorf("save-from-live build manifest: %w", err)
 	}
 
+	latest, err := latestWorkspaceChange(ctx, s.store.rdb, storageID)
+	if err != nil {
+		return false, err
+	}
+	if latest != changes {
+		return false, ErrWorkspaceConflict
+	}
 	saved, err := s.saveCheckpoint(ctx, SaveCheckpointRequest{
+		ExpectedChangesID:     changes,
+		ExpectedGeneration:    generation,
+		ImportLockToken:       options.importLockToken,
 		Workspace:             storageID,
 		ExpectedHead:          meta.HeadSavepoint,
 		CheckpointID:          checkpointID,
@@ -620,10 +647,11 @@ func (s *Service) saveCheckpointFromLive(ctx context.Context, workspace, checkpo
 		return false, fmt.Errorf("save-from-live save checkpoint: %w", err)
 	}
 	if !saved {
-		if err := MarkWorkspaceRootClean(ctx, s.store, storageID, meta.HeadSavepoint); err != nil {
-			return false, fmt.Errorf("save-from-live mark clean: %w", err)
+		if err := markCapturedWorkspaceClean(ctx, s.store, storageID, meta.HeadSavepoint, generation, changes); err != nil {
+			return false, err
 		}
 	}
+
 	return saved, nil
 }
 
@@ -1246,48 +1274,11 @@ func (s *Service) updateWorkspace(ctx context.Context, workspace string, input u
 	if err := ValidateName("workspace", workspace); err != nil {
 		return workspaceDetail{}, err
 	}
-	meta, err := s.store.GetWorkspaceMeta(ctx, workspace)
+	meta, storageID, err := s.updateWorkspaceSettings(ctx, workspace, input)
 	if err != nil {
 		return workspaceDetail{}, err
 	}
-	databaseName := strings.TrimSpace(input.DatabaseName)
-	if databaseName == "" {
-		return workspaceDetail{}, fmt.Errorf("database name is required")
-	}
-	cloudAccount := strings.TrimSpace(input.CloudAccount)
-	if cloudAccount == "" {
-		return workspaceDetail{}, fmt.Errorf("cloud account is required")
-	}
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		name = strings.TrimSpace(meta.Name)
-	}
-	if name != meta.Name {
-		if err := ValidateName("workspace", name); err != nil {
-			return workspaceDetail{}, err
-		}
-		exists, err := s.store.WorkspaceExists(ctx, name)
-		if err != nil {
-			return workspaceDetail{}, err
-		}
-		if exists {
-			return workspaceDetail{}, fmt.Errorf("workspace %q already exists", name)
-		}
-	}
-
-	meta = applyWorkspaceMetaDefaults(s.cfg, meta)
-	meta.Name = name
-	meta.Description = strings.TrimSpace(input.Description)
-	meta.DatabaseName = databaseName
-	meta.CloudAccount = cloudAccount
-	meta.Region = strings.TrimSpace(input.Region)
-	meta.Tags = workspaceTags(meta.Region, workspaceSource(meta))
-	meta.UpdatedAt = time.Now().UTC()
-
-	if err := s.store.PutWorkspaceMeta(ctx, meta); err != nil {
-		return workspaceDetail{}, err
-	}
-	if err := s.store.Audit(ctx, workspace, "workspace_update", map[string]any{
+	if err := s.store.Audit(ctx, storageID, "workspace_update", map[string]any{
 		"name":          meta.Name,
 		"database_name": meta.DatabaseName,
 		"cloud_account": meta.CloudAccount,
@@ -1295,7 +1286,7 @@ func (s *Service) updateWorkspace(ctx context.Context, workspace string, input u
 	}); err != nil {
 		return workspaceDetail{}, err
 	}
-	return s.getWorkspace(ctx, workspace)
+	return s.getWorkspace(ctx, storageID)
 }
 
 func (s *Service) listCheckpoints(ctx context.Context, workspace string, limit int) ([]checkpointSummary, error) {
@@ -1426,9 +1417,23 @@ func (s *Service) restoreCheckpoint(ctx context.Context, workspace, checkpointID
 		WorkspaceID:   storageID,
 		WorkspaceName: meta.Name,
 	}
-	if err := CheckImportLock(ctx, s.store, storageID); err != nil {
+	lock, err := AcquireImportLock(ctx, s.store, storageID)
+	if err != nil {
 		return RestoreCheckpointResult{}, err
 	}
+	defer lock.Release(context.Background())
+	previousGeneration, err := s.store.rdb.Get(ctx, WorkspaceGenerationKey(storageID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return RestoreCheckpointResult{}, ErrWorkspaceAdoptionRequired
+	}
+	if err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+	generation, err := newWorkspaceGeneration()
+	if err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+
 	exists, err := s.store.SavepointExists(ctx, storageID, checkpointID)
 	if err != nil {
 		return RestoreCheckpointResult{}, err
@@ -1436,10 +1441,28 @@ func (s *Service) restoreCheckpoint(ctx context.Context, workspace, checkpointID
 	if !exists {
 		return RestoreCheckpointResult{}, os.ErrNotExist
 	}
-	safetyCheckpointID, saved, err := s.createRestoreSafetyCheckpoint(ctx, storageID, checkpointID)
-	if err != nil {
+	fencing := "fencing:" + generation
+	if err := transitionRootGeneration(ctx, s.store, storageID, lock.Token(), previousGeneration, fencing); err != nil {
 		return RestoreCheckpointResult{}, err
 	}
+	ctx = context.WithValue(ctx, rootReplacementKey{}, rootReplacement{id: storageID, token: lock.Token(), generation: fencing})
+	safetyCheckpointID := ""
+	saved := false
+	if !strings.HasPrefix(previousGeneration, "restoring:") {
+		safetyCheckpointID, saved, err = s.createRestoreSafetyCheckpoint(ctx, storageID, checkpointID)
+		if err != nil {
+			return RestoreCheckpointResult{}, err
+		}
+	}
+	if err := lock.Lost(); err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+	if err := transitionRootGeneration(ctx, s.store, storageID, lock.Token(), fencing, "restoring:"+generation); err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+
+	ctx = context.WithValue(ctx, rootReplacementKey{}, rootReplacement{id: storageID, token: lock.Token(), generation: "restoring:" + generation})
+
 	if saved {
 		result.SafetyCheckpointID = safetyCheckpointID
 		result.SafetyCheckpointCreated = true
@@ -1465,6 +1488,12 @@ func (s *Service) restoreCheckpoint(ctx context.Context, workspace, checkpointID
 		return RestoreCheckpointResult{}, err
 	}
 	if err := SyncWorkspaceRoot(ctx, s.store, storageID, manifestValue); err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+	if err := lock.Lost(); err != nil {
+		return RestoreCheckpointResult{}, err
+	}
+	if err := transitionRootGeneration(ctx, s.store, storageID, lock.Token(), "restoring:"+generation, generation); err != nil {
 		return RestoreCheckpointResult{}, err
 	}
 	if err := afsclient.PublishInvalidation(ctx, s.store.rdb, WorkspaceFSKey(storageID), afsclient.InvalidateEvent{
@@ -1495,7 +1524,9 @@ func (s *Service) restoreCheckpoint(ctx context.Context, workspace, checkpointID
 
 func (s *Service) createRestoreSafetyCheckpoint(ctx context.Context, workspace, checkpointID string) (string, bool, error) {
 	safetyCheckpointID := restoreSafetyCheckpointName()
+	replacement, _ := ctx.Value(rootReplacementKey{}).(rootReplacement)
 	saved, err := s.saveCheckpointFromLive(ctx, workspace, safetyCheckpointID, SaveCheckpointFromLiveOptions{
+		expectedGeneration: replacement.generation, importLockToken: replacement.token,
 		Description: fmt.Sprintf("Safety checkpoint before restoring %s.", checkpointID),
 		Kind:        CheckpointKindSafety,
 		Source:      CheckpointSourceServer,
@@ -1590,8 +1621,22 @@ func (s *Service) saveCheckpoint(ctx context.Context, input SaveCheckpointReques
 		return false, err
 	}
 	storageID := workspaceStorageID(meta)
-	if err := CheckImportLock(ctx, s.store, storageID); err != nil {
+	if input.ImportLockToken != "" {
+		token, err := s.store.rdb.Get(ctx, ImportLockKey(storageID)).Result()
+		if err != nil {
+			return false, err
+		}
+		if token != input.ImportLockToken {
+			return false, ErrImportInProgress
+		}
+	} else if err := CheckImportLock(ctx, s.store, storageID); err != nil {
 		return false, err
+	}
+	if input.ExpectedGeneration == "" {
+		input.ExpectedGeneration, err = s.WorkspaceGeneration(ctx, storageID)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	headManifest, err := s.store.GetManifest(ctx, storageID, input.ExpectedHead)
@@ -1641,6 +1686,31 @@ func (s *Service) saveCheckpoint(ctx context.Context, input SaveCheckpointReques
 		if err != nil {
 			return err
 		}
+		generation, err := tx.Get(ctx, WorkspaceGenerationKey(storageID)).Result()
+		if err != nil {
+			return err
+		}
+		if generation != input.ExpectedGeneration {
+			return ErrWorkspaceConflict
+		}
+		if input.ExpectedChangesID != "" {
+			latest, err := latestWorkspaceChange(ctx, tx, storageID)
+			if err != nil {
+				return err
+			}
+			if latest != input.ExpectedChangesID {
+				return ErrWorkspaceConflict
+			}
+		}
+		if input.ImportLockToken != "" {
+			held, err := tx.Get(ctx, ImportLockKey(storageID)).Result()
+			if err != nil {
+				return err
+			}
+			if held != input.ImportLockToken {
+				return ErrImportInProgress
+			}
+		}
 		if current.HeadSavepoint != input.ExpectedHead {
 			return ErrWorkspaceConflict
 		}
@@ -1674,7 +1744,7 @@ func (s *Service) saveCheckpoint(ctx context.Context, input SaveCheckpointReques
 
 		current.HeadSavepoint = input.CheckpointID
 		current.UpdatedAt = now
-		current.DirtyHint = false
+		current.DirtyHint = input.ExpectedChangesID == ""
 
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			if err := setJSON(ctx, pipe, savepointMetaKey(storageID, input.CheckpointID), savepointMeta); err != nil {
@@ -1695,26 +1765,25 @@ func (s *Service) saveCheckpoint(ctx context.Context, input SaveCheckpointReques
 					return err
 				}
 			}
+			if input.ExpectedChangesID != "" {
+				pipe.Set(ctx, workspaceRootHeadKey(storageID), input.CheckpointID, 0)
+				pipe.Set(ctx, workspaceRootDirtyKey(storageID), "0", 0)
+			} else {
+				pipe.Set(ctx, workspaceRootDirtyKey(storageID), "1", 0)
+			}
 			enqueueChangeEntries(ctx, pipe, storageID, changelogEntries)
 			return nil
 		})
 		return err
-	}, workspaceMetaKey(storageID))
+	}, workspaceMetaKey(storageID), WorkspaceGenerationKey(storageID), workspaceChangesKey(storageID), ImportLockKey(storageID))
 	if err != nil {
 		if errors.Is(err, ErrWorkspaceConflict) || err == redis.TxFailedErr {
 			return false, ErrWorkspaceConflict
 		}
 		return false, err
 	}
-	if !input.SkipWorkspaceRootSync {
-		if err := SyncWorkspaceRoot(ctx, s.store, storageID, input.Manifest); err != nil {
-			return false, err
-		}
-	} else {
-		if err := MarkWorkspaceRootClean(ctx, s.store, storageID, input.CheckpointID); err != nil {
-			return false, err
-		}
-	}
+	// Saving a checkpoint records a snapshot. Only explicit restore replaces
+	// the live root; another client's published changes must never be discarded.
 
 	if err := s.store.Audit(ctx, storageID, "save", map[string]any{
 		"savepoint": input.CheckpointID,
@@ -2534,7 +2603,7 @@ func defaultCapabilities() capabilities {
 		BrowseCheckpoints: true,
 		BrowseWorkingCopy: true,
 		EditWorkingCopy:   false,
-		CreateCheckpoint:  false,
+		CreateCheckpoint:  true,
 		RestoreCheckpoint: true,
 	}
 }

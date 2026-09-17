@@ -147,9 +147,8 @@ func TestAFSMCPFileWriteLeavesWorkspaceDirtyAndReadReturnsContent(t *testing.T) 
 	if workspaceMeta.HeadSavepoint != "initial" {
 		t.Fatalf("workspace HeadSavepoint = %q, want %q", workspaceMeta.HeadSavepoint, "initial")
 	}
-	if !workspaceMeta.DirtyHint {
-		t.Fatal("expected MCP edit to leave the live workspace dirty")
-	}
+	// The live dirty marker is authoritative. Refreshing an edit must not write
+	// a stale metadata snapshot merely to update the legacy DirtyHint.
 	rootDirty, err := server.store.rdb.Get(context.Background(), controlplane.WorkspaceRootDirtyKey(workspaceMeta.ID)).Result()
 	if err != nil {
 		t.Fatalf("Get(root_dirty) returned error: %v", err)

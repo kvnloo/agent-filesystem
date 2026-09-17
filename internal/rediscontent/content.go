@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -119,6 +120,14 @@ func ReadRange(ctx context.Context, rdb *redis.Client, contentKey, ref string, s
 }
 
 func WriteRange(ctx context.Context, rdb *redis.Client, contentKey string, off int64, payload []byte) error {
+	return WriteRangeWithTTL(ctx, rdb, contentKey, off, payload, 0)
+}
+
+// WriteRangeWithTTL preserves the range algorithm while atomically attaching
+// expiry to its final ARSET. Private publication stages cannot become immortal
+// when a restore or expiry removes their key during the preceding range read.
+// A zero TTL retains the existing WriteRange behavior for live content keys.
+func WriteRangeWithTTL(ctx context.Context, rdb *redis.Client, contentKey string, off int64, payload []byte, ttl time.Duration) error {
 	if off < 0 {
 		return errors.New("invalid offset")
 	}
@@ -132,10 +141,15 @@ func WriteRange(ctx context.Context, rdb *redis.Client, contentKey string, off i
 	if !supported {
 		return fmt.Errorf("redis array content requested for %q but the server does not support array commands", contentKey)
 	}
-	return writeArrayRange(ctx, rdb, contentKey, off, payload)
+	return writeArrayRange(ctx, rdb, contentKey, off, payload, ttl)
 }
 
 func Truncate(ctx context.Context, rdb *redis.Client, contentKey string, oldSize, newSize int64) error {
+	return TruncateWithTTL(ctx, rdb, contentKey, oldSize, newSize, 0)
+}
+
+// TruncateWithTTL also protects a partial final-chunk ARSET on a private stage.
+func TruncateWithTTL(ctx context.Context, rdb *redis.Client, contentKey string, oldSize, newSize int64, ttl time.Duration) error {
 	if newSize < 0 {
 		return errors.New("invalid size")
 	}
@@ -146,39 +160,7 @@ func Truncate(ctx context.Context, rdb *redis.Client, contentKey string, oldSize
 	if !supported {
 		return fmt.Errorf("redis array content requested for %q but the server does not support array commands", contentKey)
 	}
-	return truncateArray(ctx, rdb, contentKey, oldSize, newSize)
-}
-
-func MayContainLiteral(ctx context.Context, rdb *redis.Client, contentKey string, size int64, literal string, nocase bool) (bool, error) {
-	if size <= 0 || literal == "" {
-		return size > 0, nil
-	}
-	supported, err := SupportsArrays(ctx, rdb)
-	if err != nil {
-		return false, err
-	}
-	if !supported {
-		return false, nil
-	}
-	candidates := literalProbeTerms(literal)
-	if len(candidates) == 0 {
-		return true, nil
-	}
-	args := make([]interface{}, 0, 5+(len(candidates)*2)+3)
-	args = append(args, "ARGREP", contentKey, 0, chunkCountForSize(size)-1)
-	for _, candidate := range candidates {
-		args = append(args, "MATCH", candidate)
-	}
-	if nocase {
-		args = append(args, "NOCASE")
-	}
-	args = append(args, "LIMIT", 1)
-	reply, err := rdb.Do(ctx, args...).Result()
-	if err != nil {
-		return false, err
-	}
-	values := arrayReplyValues(reply)
-	return len(values) > 0, nil
+	return truncateArray(ctx, rdb, contentKey, oldSize, newSize, ttl)
 }
 
 func probeArraySupport(ctx context.Context, rdb *redis.Client) (bool, error) {
@@ -293,7 +275,7 @@ func readArrayRange(ctx context.Context, rdb *redis.Client, contentKey string, s
 	return result, nil
 }
 
-func writeArrayRange(ctx context.Context, rdb *redis.Client, contentKey string, off int64, payload []byte) error {
+func writeArrayRange(ctx context.Context, rdb *redis.Client, contentKey string, off int64, payload []byte, ttl time.Duration) error {
 	startChunk := int(off / ArrayChunkBytes)
 	endByte := off + int64(len(payload))
 	endChunk := int((endByte - 1) / ArrayChunkBytes)
@@ -334,10 +316,18 @@ func writeArrayRange(ctx context.Context, rdb *redis.Client, contentKey string, 
 	for i, chunk := range chunks {
 		args = append(args, string(chunk[:chunkLens[i]]))
 	}
-	return rdb.Do(ctx, args...).Err()
+	if ttl <= 0 {
+		return rdb.Do(ctx, args...).Err()
+	}
+	_, err = rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Do(ctx, args...)
+		pipe.Expire(ctx, contentKey, ttl)
+		return nil
+	})
+	return err
 }
 
-func truncateArray(ctx context.Context, rdb *redis.Client, contentKey string, oldSize, newSize int64) error {
+func truncateArray(ctx context.Context, rdb *redis.Client, contentKey string, oldSize, newSize int64, ttl time.Duration) error {
 	if newSize == oldSize {
 		return nil
 	}
@@ -368,6 +358,9 @@ func truncateArray(ctx context.Context, rdb *redis.Client, contentKey string, ol
 	}
 
 	pipe := rdb.Pipeline()
+	if ttl > 0 {
+		pipe = rdb.TxPipeline()
+	}
 	if len(values) > 0 && values[0] != nil {
 		raw := arrayValueBytes(values[0])
 		keep := min(lastChunkSize, len(raw))
@@ -376,6 +369,9 @@ func truncateArray(ctx context.Context, rdb *redis.Client, contentKey string, ol
 	}
 	if newChunks < oldChunks {
 		pipe.Do(ctx, "ARDELRANGE", contentKey, newChunks, oldChunks-1)
+	}
+	if ttl > 0 {
+		pipe.Expire(ctx, contentKey, ttl)
 	}
 	_, err = pipe.Exec(ctx)
 	return err
@@ -435,6 +431,58 @@ func chunkCountForSize(size int64) int {
 	return int((size + ArrayChunkBytes - 1) / ArrayChunkBytes)
 }
 
+func arraySupportCacheKey(rdb *redis.Client) string {
+	opts := rdb.Options()
+	if opts == nil {
+		return "unknown"
+	}
+	return strings.Join([]string{
+		opts.Network,
+		opts.Addr,
+		opts.Username,
+		strconv.Itoa(opts.DB),
+	}, "|")
+}
+
+func isUnknownCommand(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unknown command")
+}
+
+func MayContainLiteral(ctx context.Context, rdb *redis.Client, contentKey string, size int64, literal string, nocase bool) (bool, error) {
+	if size <= 0 || literal == "" {
+		return size > 0, nil
+	}
+	supported, err := SupportsArrays(ctx, rdb)
+	if err != nil {
+		return false, err
+	}
+	if !supported {
+		return false, nil
+	}
+	candidates := literalProbeTerms(literal)
+	if len(candidates) == 0 {
+		return true, nil
+	}
+	args := make([]interface{}, 0, 5+(len(candidates)*2)+3)
+	args = append(args, "ARGREP", contentKey, 0, chunkCountForSize(size)-1)
+	for _, candidate := range candidates {
+		args = append(args, "MATCH", candidate)
+	}
+	if nocase {
+		args = append(args, "NOCASE")
+	}
+	args = append(args, "LIMIT", 1)
+	reply, err := rdb.Do(ctx, args...).Result()
+	if err != nil {
+		return false, err
+	}
+	values := arrayReplyValues(reply)
+	return len(values) > 0, nil
+}
+
 func literalProbeTerms(literal string) []string {
 	if literal == "" {
 		return nil
@@ -480,24 +528,4 @@ func uniqueByteTerms(data []byte, width int) []string {
 		}
 	}
 	return terms
-}
-
-func arraySupportCacheKey(rdb *redis.Client) string {
-	opts := rdb.Options()
-	if opts == nil {
-		return "unknown"
-	}
-	return strings.Join([]string{
-		opts.Network,
-		opts.Addr,
-		opts.Username,
-		strconv.Itoa(opts.DB),
-	}, "|")
-}
-
-func isUnknownCommand(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "unknown command")
 }

@@ -1,6 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Loader } from "@redis-ui/components";
-import { useMemo } from "react";
 import styled from "styled-components";
 import { PageStack } from "../components/afs-kit";
 import { AgentHeroAnimation } from "../components/agent-hero-animation";
@@ -19,17 +18,13 @@ import { ActivityTable } from "../foundation/tables/activity-table";
 import type {
   AFSActivityEvent,
   AFSAgentSession,
-  AFSWorkspaceCompositionSummary,
   AFSWorkspaceSummary,
 } from "../foundation/types/afs";
 import { queryClient } from "../foundation/query-client";
-import { groupMountedAgentWorkspaceSessions } from "../foundation/agent-session-grouping";
 import {
   agentsQueryOptions,
   databasesQueryOptions,
   useQuickstartMutation,
-  useWorkspaceCompositions,
-  workspaceCompositionsQueryOptions,
   workspaceSummariesQueryOptions,
 } from "../foundation/hooks/use-afs";
 
@@ -44,10 +39,6 @@ export const Route = createFileRoute("/")({
       queryClient.ensureQueryData({ ...databasesQueryOptions(), revalidateIfStale: true }),
       queryClient.ensureQueryData({
         ...workspaceSummariesQueryOptions(null),
-        revalidateIfStale: true,
-      }),
-      queryClient.ensureQueryData({
-        ...workspaceCompositionsQueryOptions(),
         revalidateIfStale: true,
       }),
       queryClient.ensureQueryData({ ...agentsQueryOptions(null), revalidateIfStale: true }),
@@ -69,7 +60,6 @@ function HomeRoute() {
 function OverviewPage() {
   const workspacesQuery = useScopedWorkspaceSummaries();
   const agentsQuery = useScopedAgents();
-  const agentWorkspacesQuery = useWorkspaceCompositions();
   const { databases, isLoading: databasesLoading } = useDatabaseScope();
   const quickstartMutation = useQuickstartMutation();
   const { open: openDrawer } = useDrawer();
@@ -77,8 +67,7 @@ function OverviewPage() {
   if (
     databasesLoading ||
     workspacesQuery.isLoading ||
-    agentsQuery.isLoading ||
-    agentWorkspacesQuery.isLoading
+    agentsQuery.isLoading
   ) {
     return <Loader data-testid="loader--spinner" />;
   }
@@ -110,7 +99,6 @@ function OverviewPage() {
     <InspectorView
       workspaces={workspaces}
       agents={agentsQuery.data}
-      agentWorkspaces={agentWorkspacesQuery.data ?? []}
       databases={databases}
       onChoosePath={handleChoosePath}
     />
@@ -126,22 +114,17 @@ function OverviewPage() {
 function InspectorView({
   workspaces,
   agents,
-  agentWorkspaces,
   databases,
   onChoosePath,
 }: {
   workspaces: AFSWorkspaceSummary[];
   agents: AFSAgentSession[];
-  agentWorkspaces: AFSWorkspaceCompositionSummary[];
   databases: AFSDatabaseScopeRecord[];
   onChoosePath: (path: OnboardingPath) => void;
 }) {
   const navigate = useNavigate();
   const activityQuery = useScopedActivity(50);
-  const groupedAgents = useMemo(
-    () => groupMountedAgentWorkspaceSessions(agents, agentWorkspaces),
-    [agents, agentWorkspaces],
-  );
+  const groupedAgents = agents;
   const connectedAgents = groupedAgents.length;
   const opsPerMin = computeOpsPerMin(activityQuery.data);
   const hasQuickstartWorkspace = workspaces.some(
@@ -152,8 +135,8 @@ function InspectorView({
   function openActivity(event: AFSActivityEvent) {
     if (!event.workspaceId) return;
     void navigate({
-      to: "/volumes/$volumeId",
-      params: { volumeId: event.workspaceId },
+      to: "/workspaces/$workspaceId",
+      params: { workspaceId: event.workspaceId },
       search: {
         ...(event.databaseId ? { databaseId: event.databaseId } : {}),
         tab: "activity",
@@ -178,7 +161,6 @@ function InspectorView({
       <LiveTopologyCard
         agents={groupedAgents}
         workspaces={workspaces}
-        agentWorkspaces={agentWorkspaces}
       />
 
       <ActivityCard>

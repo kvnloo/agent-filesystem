@@ -1,11 +1,14 @@
 # Volume + Workspace Data Model
 
-Status: implementation pass landed
+Status: superseded
 Owner: rowan
 Created: 2026-05-08
-Updated: 2026-05-09
+Updated: 2026-09-17
 
-Pair plan: [`volume-workspace-surfaces.md`](volume-workspace-surfaces.md) (CLI + UI rollout).
+Superseded on 2026-09-17 by [Single-tree workspaces](2026-09-17-single-tree-workspaces.md).
+The composition model is retired; this archived plan records historical intent only.
+
+Pair plan: [`volume-workspace-surfaces.md`](2026-09-17-volume-workspace-surfaces.md) (CLI + UI rollout).
 
 ## Goal
 

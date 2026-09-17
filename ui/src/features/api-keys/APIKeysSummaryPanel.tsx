@@ -8,11 +8,11 @@ import { isControlPlaneScope } from "../../foundation/types/afs";
 import { formatCapability } from "../../foundation/tables/api-key-format";
 
 type Props = {
-  /** Volume / workspace id the summary should filter on. */
+  /** Workspace / workspace id the summary should filter on. */
   workspaceId: string;
   workspaceName: string;
   databaseId?: string;
-  /** Headline label — defaults to "API keys for this volume". */
+  /** Headline label — defaults to "API keys for this workspace". */
   headline?: string;
   /** Empty state message when no keys exist yet. */
   emptyState?: string;
@@ -43,8 +43,8 @@ export function APIKeysSummaryPanel({
   workspaceId,
   workspaceName,
   databaseId,
-  headline = "API keys for this volume",
-  emptyState = "No API keys for this volume yet. Create one to let agents or the CLI reach it.",
+  headline = "API keys for this workspace",
+  emptyState = "No API keys for this workspace yet. Create one to let agents or the CLI reach it.",
   preview = 5,
 }: Props) {
   const navigate = useNavigate();

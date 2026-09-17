@@ -68,10 +68,6 @@ func main() {
 		if err := cmdDaemon(args); err != nil {
 			fatal(err)
 		}
-	case "vol":
-		if err := cmdVolume(args); err != nil {
-			fatal(err)
-		}
 	case "fs":
 		if err := cmdFS(args); err != nil {
 			fatal(err)
@@ -97,11 +93,11 @@ func main() {
 			fatal(err)
 		}
 	case "mount":
-		if err := cmdRootMountArgs(args[1:]); err != nil {
+		if err := cmdMountArgs(args[1:]); err != nil {
 			fatal(err)
 		}
 	case "unmount":
-		if err := cmdRootUnmountArgs(args[1:]); err != nil {
+		if err := cmdUnmountArgs(args[1:]); err != nil {
 			fatal(err)
 		}
 	case "database":
@@ -129,8 +125,8 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		if isVolumeRootShortcut(args[0]) {
-			if err := cmdVolume(volumeRootShortcutArgs(args)); err != nil {
+		if isWorkspaceRootShortcut(args[0]) {
+			if err := cmdWorkspace(workspaceRootShortcutArgs(args)); err != nil {
 				fatal(err)
 			}
 			return
@@ -141,7 +137,7 @@ func main() {
 	}
 }
 
-func isVolumeRootShortcut(command string) bool {
+func isWorkspaceRootShortcut(command string) bool {
 	switch command {
 	case "create", "list", "clone", "default",
 		"set-default", "unset-default", "info", "import", "fork",
@@ -152,9 +148,9 @@ func isVolumeRootShortcut(command string) bool {
 	}
 }
 
-func volumeRootShortcutArgs(args []string) []string {
+func workspaceRootShortcutArgs(args []string) []string {
 	rewritten := make([]string, 0, len(args)+1)
-	rewritten = append(rewritten, "vol")
+	rewritten = append(rewritten, "ws")
 	rewritten = append(rewritten, args...)
 	return rewritten
 }
@@ -181,7 +177,6 @@ func printUsage() {
 	fmt.Fprintf(w, "  %sws%s (workspace)     %smount, create and manage workspaces%s\n", bold, reset, dim, reset)
 	fmt.Fprintf(w, "  %sfs%s (filesystem)    %sread, search, and safely write workspace files%s\n", bold, reset, dim, reset)
 	fmt.Fprintf(w, "  %scp%s (checkpoint)    %screate, list, show, diff, restore%s\n", bold, reset, dim, reset)
-	fmt.Fprintf(w, "  %svol%s (volume) - %sdirect support for underlying volumes - create, import, list, etc.%s\n", bold, reset, dim, reset)
 	fmt.Fprintf(w, "  %slog%s                %sWorkspace file-change log%s\n\n", bold, reset, dim, reset)
 
 	fmt.Fprintf(w, "  %sauth%s               %slogin, logout, and inspect authentication%s\n", bold, reset, dim, reset)
@@ -193,13 +188,9 @@ func printUsage() {
 	fmt.Fprintf(w, "  %smcp%s                %sstart the MCP server%s\n", bold, reset, dim, reset)
 	fmt.Fprintf(w, "  %sskill%s              %sshow or install the packaged AFS skill%s\n\n", bold, reset, dim, reset)
 
-	fmt.Fprintf(w, "%sAgent Workspace Shortcuts:%s\n", bold, reset)
-	fmt.Fprintf(w, "  %s%s mount%s and %s%s unmount%s map to Agent Workspace manifests (%s ws mount/unmount).\n\n", orange, bin, reset, orange, bin, reset, bin)
-
-	fmt.Fprintf(w, "%sVolume Shortcuts:%s\n", bold, reset)
-	fmt.Fprintf(w, "  %sOmit \"vol\" for:%s create, list, clone, default, set-default,\n", dim, reset)
-	fmt.Fprintf(w, "                 unset-default, info, import, fork, delete\n")
-	fmt.Fprintf(w, "  %sExample:%s %s%s create demo%s  %s(same as %s vol create demo)%s\n\n", dim, reset, orange, bin, reset, dim, bin, reset)
+	fmt.Fprintf(w, "%sWorkspace Shortcuts:%s\n", bold, reset)
+	fmt.Fprintf(w, "  %sOmit \"ws\" for:%s mount, unmount, create, list, clone, default, set-default,\n", dim, reset)
+	fmt.Fprintf(w, "                 unset-default, info, import, fork, delete\n\n")
 
 	fmt.Fprintf(w, "%sFilesystem Shortcuts:%s\n", bold, reset)
 	fmt.Fprintf(w, "  %sOmit \"fs\" for:%s grep, query\n", dim, reset)
@@ -208,15 +199,14 @@ func printUsage() {
 
 	fmt.Fprintf(w, "%sExamples:%s\n", bold, reset)
 	fmt.Fprintf(w, "  %s%s auth login%s\n    Sign in to AFS Cloud via browser.\n", orange, bin, reset)
-	fmt.Fprintf(w, "  %s%s mount coding-agent ~/coding-agent%s\n    Mount an Agent Workspace to a local root.\n", orange, bin, reset)
-	fmt.Fprintf(w, "  %s%s vol mount getting-started ~/getting-started%s\n    Mount a single volume to a local folder.\n\n", orange, bin, reset)
+	fmt.Fprintf(w, "  %s%s mount coding-agent ~/coding-agent%s\n    Mount a workspace to one local directory.\n", orange, bin, reset)
 
 	fmt.Fprintf(w, "%sAI Agents:%s\n", bold, reset)
 	fmt.Fprintf(w, "  - Run `%s mcp` to expose the MCP server (stdio) to agents.\n", bin)
 	fmt.Fprintf(w, "  - `%s skill install` installs the AFS skill into ./.agents/skills/afs.\n", bin)
 	fmt.Fprintf(w, "  - Use `%s skill install --global` for ~/.agents/skills/afs.\n", bin)
 	fmt.Fprintf(w, "  - `%s --skill` is kept as an alias for `%s skill show`.\n", bin, bin)
-	fmt.Fprintf(w, "  - Advanced: `%s mcp --volume <name> --profile <profile>` scopes agent access.\n\n", bin)
+	fmt.Fprintf(w, "  - Advanced: `%s mcp --workspace <name> --profile <profile>` scopes agent access.\n\n", bin)
 
 	fmt.Fprintf(w, "%sConfig:%s %s%s%s\n", bold, reset, dim, compactDisplayPath(configPath()), reset)
 }

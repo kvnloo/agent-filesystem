@@ -70,9 +70,9 @@ func TestCrossClientInvalidation(t *testing.T) {
 	const fsKey = "crossclient-test"
 
 	// Writer (short TTL is fine; it is the publisher).
-	writer := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
+	writer := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
 	// Reader keeps a long TTL so only pub/sub can make its cache stale.
-	reader := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
+	reader := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
 
 	// Start the reader subscriber and wait for it to actually be
 	// subscribed before the writer publishes. We drive this off a
@@ -141,7 +141,7 @@ func TestCrossClientInvalidationOriginDedup(t *testing.T) {
 	rdb, ctx := setupTestRedis(t)
 
 	const fsKey = "origin-dedup-test"
-	c := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
+	c := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
 
 	events := make(chan InvalidateEvent, 16)
 	subCtx, cancelSub := context.WithCancel(ctx)
@@ -175,8 +175,8 @@ func TestDisableInvalidationPublishingSilencesPublisher(t *testing.T) {
 	rdb, ctx := setupTestRedis(t)
 
 	const fsKey = "disabled-publisher-test"
-	writer := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
-	reader := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
+	writer := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
+	reader := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
 	writer.DisableInvalidationPublishing()
 
 	events := make(chan InvalidateEvent, 4)
@@ -196,6 +196,10 @@ func TestDisableInvalidationPublishingSilencesPublisher(t *testing.T) {
 		t.Fatalf("Echo: %v", err)
 	}
 
+	if count, err := rdb.XLen(ctx, writer.keys.changesStream()).Result(); err != nil || count < 2 {
+		t.Fatalf("disabled Pub/Sub lost publication journal: %d %v", count, err)
+	}
+
 	select {
 	case ev := <-events:
 		t.Fatalf("reader received event from disabled publisher: %+v", ev)
@@ -208,7 +212,7 @@ func TestPublishInvalidationWritesStreamAndPubSub(t *testing.T) {
 	rdb, ctx := setupTestRedis(t)
 
 	const fsKey = "server-publish-test"
-	reader := NewWithCache(rdb, fsKey, time.Hour).(*nativeClient)
+	reader := NewWithCache(rdb, fsKey, time.Hour).(*generationClient).Client.(*nativeClient)
 	events := make(chan InvalidateEvent, 4)
 	subCtx, cancelSub := context.WithCancel(ctx)
 	defer cancelSub()

@@ -118,7 +118,7 @@ func prepareSyncBootstrapForWorkspace(ctx context.Context, cfg config, requested
 // returns control to the shell.
 func startSyncServices(cfg config, foreground bool) error {
 	if strings.TrimSpace(cfg.LocalPath) == "" {
-		return errors.New("localPath is required when mode=sync; run `afs vol mount <volume> <directory>`")
+		return errors.New("localPath is required when mode=sync; run `afs ws mount <workspace> <directory>`")
 	}
 	localRoot, err := expandPath(cfg.LocalPath)
 	if err != nil {

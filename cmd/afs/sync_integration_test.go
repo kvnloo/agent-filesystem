@@ -1710,8 +1710,14 @@ func TestSyncRootReplaceRematerializesLocalTree(t *testing.T) {
 	assertEventually(t, 5*time.Second, "restored tree to materialize", func() bool {
 		return env.localExists("restored.txt") && env.readLocalFile(t, "restored.txt") == "restored" && !env.localExists("current.txt")
 	})
-	if env.remoteExists(t, "current.txt") {
-		t.Fatalf("current.txt was re-uploaded after root replace")
+	// A fresh observer can read the replacement generation; the pre-restore
+	// client's generation is intentionally stale and may not be reused.
+	current, err := client.New(env.rdb, env.mountKey).Stat(ctx, "/current.txt")
+	if err != nil {
+		t.Fatalf("Stat replacement generation: %v", err)
+	}
+	if current != nil {
+		t.Fatal("current.txt was re-uploaded after root replace")
 	}
 }
 

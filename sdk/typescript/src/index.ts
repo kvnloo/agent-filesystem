@@ -35,8 +35,7 @@ export type RepoRef = WorkspaceRef;
 export type MountMode = "ro" | "rw" | "rw-checkpoint";
 
 export type MountInput = {
-  workspaces?: WorkspaceRef[];
-  repos?: RepoRef[];
+  workspace: string | WorkspaceRef;
   mode?: MountMode;
   tokenName?: string;
 };
@@ -262,34 +261,22 @@ export class FSClient {
   constructor(private readonly controlPlane: MCPHttpClient) {}
 
   async mount(input: MountInput): Promise<MountedFS> {
-    const workspaces = input.workspaces ?? input.repos ?? [];
-    if (!workspaces.length) {
-      throw new AFSError("fs.mount requires at least one workspace");
-    }
-    const profile = profileForMode(input.mode ?? "rw");
-    const mounted: MountedWorkspace[] = [];
-    for (const workspace of workspaces) {
-      const issued = await this.controlPlane.callTool<MCPTokenIssueResponse>("mcp_token_issue", {
-        workspace: workspace.name,
-        name: input.tokenName ?? `redis-afs ${workspace.name}`,
-        profile,
-      });
-      if (!issued.token) {
-        throw new AFSError(`mcp_token_issue did not return a token for ${workspace.name}`, { payload: issued });
-      }
-      mounted.push({
-        name: workspace.name,
-        token: issued.token,
-        client: new MCPHttpClient({
-          apiKey: issued.token,
-          baseUrl: issued.url ?? this.controlPlane.endpoint,
-          fetch: this.controlPlane.fetchImpl,
-          timeoutMs: this.controlPlane.timeoutMs,
-        }),
-      });
-    }
-    return new MountedFS(mounted, { mode: input.mode ?? "rw" });
+    const name = typeof input.workspace === "string" ? input.workspace.trim() : input.workspace?.name.trim();
+    if (!name) throw new AFSError("fs.mount requires one workspace");
+    const issued = await this.controlPlane.callTool<MCPTokenIssueResponse>("mcp_token_issue", {
+      workspace: name,
+      name: input.tokenName ?? `redis-afs ${name}`,
+      profile: profileForMode(input.mode ?? "rw"),
+    });
+    if (!issued.token) throw new AFSError(`mcp_token_issue did not return a token for ${name}`, { payload: issued });
+    return new MountedFS({ name, token: issued.token, client: new MCPHttpClient({
+      apiKey: issued.token,
+      baseUrl: issued.url ?? this.controlPlane.endpoint,
+      fetch: this.controlPlane.fetchImpl,
+      timeoutMs: this.controlPlane.timeoutMs,
+    }) }, { mode: input.mode ?? "rw" });
   }
+
 }
 
 type MountedWorkspace = {
@@ -304,28 +291,13 @@ type ResolvedMountPath = {
 };
 
 export class MountedFS {
-  private readonly workspacesByName = new Map<string, MountedWorkspace>();
   private localRootPath?: string;
 
-  constructor(
-    private readonly workspaces: MountedWorkspace[],
-    readonly options: { mode: MountMode },
-  ) {
-    for (const workspace of workspaces) {
-      if (this.workspacesByName.has(workspace.name)) {
-        throw new AFSError(`workspace ${workspace.name} is mounted more than once`);
-      }
-      this.workspacesByName.set(workspace.name, workspace);
-    }
+  constructor(private readonly workspace: MountedWorkspace, readonly options: { mode: MountMode }) {
+    if (!workspace || Array.isArray(workspace) || !workspace.name) throw new AFSError("mount requires one workspace");
   }
 
-  get repoNames(): string[] {
-    return this.workspaceNames;
-  }
-
-  get workspaceNames(): string[] {
-    return this.workspaces.map((workspace) => workspace.name);
-  }
+  get workspaceName(): string { return this.workspace.name; }
 
   get localRoot(): string | undefined {
     return this.localRootPath;
@@ -353,7 +325,7 @@ export class MountedFS {
       content: text,
     });
     if (this.localRootPath) {
-      const localPath = this.localPathFor(resolved.workspace.name, resolved.remotePath);
+      const localPath = this.localPathFor(resolved.remotePath);
       await mkdir(nodePath.dirname(localPath), { recursive: true });
       await nodeWriteFile(localPath, text, "utf8");
     }
@@ -396,25 +368,14 @@ export class MountedFS {
       path: resolved.remotePath,
     });
     if (this.localRootPath) {
-      const localPath = this.localPathFor(resolved.workspace.name, resolved.remotePath);
+      const localPath = this.localPathFor(resolved.remotePath);
       await rm(localPath, { recursive: true, force: true });
     }
     return response;
   }
 
-  async checkpoint(name?: string): Promise<{ workspace: string; checkpoint: string; created: boolean }[]> {
-    const out = [];
-    for (const workspace of this.workspaces) {
-      out.push(
-        await workspace.client.callTool<{ workspace: string; checkpoint: string; created: boolean }>(
-          "checkpoint_create",
-          {
-            checkpoint: name,
-          },
-        ),
-      );
-    }
-    return out;
+  async checkpoint(name?: string): Promise<{ workspace: string; checkpoint: string; created: boolean }> {
+    return this.workspace.client.callTool("checkpoint_create", { checkpoint: name });
   }
 
   bash(): BashRunner {
@@ -423,26 +384,14 @@ export class MountedFS {
 
   async syncFromRemote(): Promise<string> {
     const root = await this.ensureLocalRoot();
-    for (const workspace of this.workspaces) {
-      const workspaceRoot = nodePath.join(root, workspace.name);
-      await rm(workspaceRoot, { recursive: true, force: true });
-      await mkdir(workspaceRoot, { recursive: true });
-      await this.copyRemoteDirectory(workspace, "/", workspaceRoot);
-    }
+    await rm(root, { recursive: true, force: true });
+    await mkdir(root, { recursive: true });
+    await this.copyRemoteDirectory(this.workspace, "/", root);
     return root;
   }
 
   async syncToRemote(): Promise<void> {
-    if (!this.localRootPath) {
-      return;
-    }
-    for (const workspace of this.workspaces) {
-      const workspaceRoot = nodePath.join(this.localRootPath, workspace.name);
-      if (!(await exists(workspaceRoot))) {
-        continue;
-      }
-      await this.copyLocalDirectory(workspace, workspaceRoot, "/");
-    }
+    if (this.localRootPath) await this.copyLocalDirectory(this.workspace, this.localRootPath, "/");
   }
 
   async close(): Promise<void> {
@@ -453,43 +402,8 @@ export class MountedFS {
     this.localRootPath = undefined;
   }
 
-  mapAbsoluteWorkspacePaths(command: string): string {
-    if (!this.localRootPath) {
-      return command;
-    }
-    let out = command;
-    const names = this.workspaceNames.sort((a, b) => b.length - a.length);
-    for (const name of names) {
-      const remotePrefix = `/${name}`;
-      const localPrefix = nodePath.join(this.localRootPath, name).replaceAll("\\", "/");
-      out = out.replace(new RegExp(`${escapeRegExp(remotePrefix)}(?=/|\\s|$)`, "g"), localPrefix);
-    }
-    return out;
-  }
-
-  mapAbsoluteRepoPaths(command: string): string {
-    return this.mapAbsoluteWorkspacePaths(command);
-  }
-
   private resolvePath(rawPath: string): ResolvedMountPath {
-    const normalized = normalizeRemotePath(rawPath);
-    const names = this.workspaceNames.sort((a, b) => b.length - a.length);
-    for (const name of names) {
-      const prefix = `/${name}`;
-      if (normalized === prefix) {
-        return { workspace: this.workspacesByName.get(name)!, remotePath: "/" };
-      }
-      if (normalized.startsWith(`${prefix}/`)) {
-        return {
-          workspace: this.workspacesByName.get(name)!,
-          remotePath: normalized.slice(prefix.length) || "/",
-        };
-      }
-    }
-    if (this.workspaces.length === 1) {
-      return { workspace: this.workspaces[0]!, remotePath: normalized };
-    }
-    throw new AFSError(`path ${rawPath} must start with one of: ${names.map((name) => `/${name}`).join(", ")}`);
+    return { workspace: this.workspace, remotePath: normalizeRemotePath(rawPath) };
   }
 
   private async ensureLocalRoot(): Promise<string> {
@@ -499,12 +413,12 @@ export class MountedFS {
     return this.localRootPath;
   }
 
-  private localPathFor(workspaceName: string, remotePath: string): string {
+  private localPathFor(remotePath: string): string {
     if (!this.localRootPath) {
       throw new AFSError("mount has not been materialized locally yet");
     }
     const relative = normalizeRemotePath(remotePath).replace(/^\/+/, "");
-    return nodePath.join(this.localRootPath, workspaceName, relative);
+    return nodePath.join(this.localRootPath, relative);
   }
 
   private async copyRemoteDirectory(workspace: MountedWorkspace, remotePath: string, localPath: string): Promise<void> {
@@ -556,7 +470,7 @@ export class BashRunner {
 
   async exec(command: string, options: BashExecOptions = {}): Promise<BashResult> {
     const root = await this.fs.syncFromRemote();
-    const mappedCommand = this.fs.mapAbsoluteWorkspacePaths(command);
+    const mappedCommand = command;
     const result = await runShell(mappedCommand, {
       cwd: options.cwd ? nodePath.resolve(root, options.cwd) : root,
       env: options.env,
@@ -694,10 +608,6 @@ function readEnv(name: string): string | undefined {
     return undefined;
   }
   return process.env[name];
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function exists(path: string): Promise<boolean> {

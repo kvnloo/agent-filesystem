@@ -36,7 +36,7 @@ fs.list_files(path, depth)      # list a directory
 fs.delete(path)                 # delete a file, symlink, or empty directory
 fs.glob(pattern, ...)           # match paths
 fs.grep(pattern, **options)     # search file contents
-fs.checkpoint(name)             # checkpoint mounted workspaces
+fs.checkpoint(name)             # checkpoint the workspace
 fs.bash().exec(command, ...)    # run a shell command against the mount
 ```
 
@@ -66,14 +66,14 @@ afs = AFS(api_key=os.environ["AFS_API_KEY"])
 workspace = afs.workspace.create(name="foobar")
 
 fs = afs.fs.mount(
-    workspaces=[{"name": workspace["name"]}],
+    workspace=workspace["name"],
     mode="rw",
 )
 
 try:
     fs.write_file("/src/README.md", "hello world")
 
-    result = fs.bash().exec("cat /foobar/src/README.md")
+    result = fs.bash().exec("cat src/README.md")
     print(result.stdout)
 finally:
     fs.close()
@@ -82,7 +82,7 @@ finally:
 `MountedFS` also works as a context manager:
 
 ```python
-with afs.fs.mount(workspaces=[{"name": "foobar"}], mode="rw") as fs:
+with afs.fs.mount(workspace="foobar", mode="rw") as fs:
     fs.write_file("/README.md", "hello")
 ```
 
@@ -260,20 +260,20 @@ mount. This is not a kernel FUSE or NFS mount.
 
 ```python
 fs = afs.fs.mount(
-    workspaces=[{"name": "foobar"}],
+    workspace="foobar",
     mode="rw",
     token_name="optional token label",
 )
 ```
 
 ```python
-workspaces: Sequence[Mapping[str, Any]]
+workspace: str | Mapping[str, Any]
 mode: "ro" | "rw" | "rw-checkpoint"
 token_name: str | None
 ```
 
-The preview `repos` mount option still works, but new code should use
-`workspaces`.
+Pass one workspace name or reference. The former `workspaces` and `repos`
+arrays are removed; create separate mount handles for separate workspaces.
 
 ### Modes
 
@@ -285,9 +285,8 @@ The preview `repos` mount option still works, but new code should use
 
 ### Path Rules
 
-- With one mounted workspace, `/src/file.py` is workspace-relative.
-- With multiple mounted workspaces, paths must start with the workspace name,
-  such as `/api/app.py` or `/web/package.json`.
+- File paths are relative to the workspace tree root, including `/src/file.py`.
+- A directory matching the workspace name is a normal directory.
 - Paths are normalized as POSIX paths and cannot contain `..`.
 
 ## MountedFS API
@@ -298,12 +297,11 @@ and shell execution.
 ### Properties
 
 ```python
-fs.workspace_names -> list[str]
+fs.workspace_name -> str
 fs.local_root -> str | None
 fs.mode -> str
 ```
 
-The preview `repo_names` property still works.
 
 ### File Methods
 
@@ -344,26 +342,25 @@ extra options to the hosted `file_grep` MCP tool.
 ### Checkpoint Method
 
 ```python
-fs.checkpoint(name: str | None = None) -> list[dict[str, Any]]
+fs.checkpoint(name: str | None = None) -> dict[str, Any]
 ```
 
-Creates a checkpoint for each mounted workspace.
+Creates one checkpoint from the workspace’s published Redis state. It cannot
+flush pending local files from other clients. Call `syncToRemote()` (TypeScript)
+or `sync_to_remote()` (Python) before checkpointing local SDK edits.
 
 ### Local Materialization
 
 ```python
 fs.sync_from_remote() -> str
 fs.sync_to_remote() -> None
-fs.map_absolute_workspace_paths(command: str) -> str
 fs.close() -> None
 ```
 
-`sync_from_remote()` creates a temporary local directory and downloads mounted
-workspaces into it. `sync_to_remote()` writes created and modified local text
+`sync_from_remote()` creates a temporary local directory and downloads the workspace
+tree directly into it. `sync_to_remote()` writes created and modified local text
 files back through MCP. `close()` removes the temporary local directory.
 
-The preview `map_absolute_repo_paths()` helper still works, but new code should
-use `map_absolute_workspace_paths()`.
 
 ## Bash API
 
@@ -398,9 +395,10 @@ class BashResult:
 
 ### Behavior
 
-`bash().exec()` materializes workspaces, rewrites absolute workspace paths such
-as `/foobar/src/README.md` to the isolated local directory, runs the command,
-then syncs created and modified text files back to AFS.
+`bash().exec()` materializes the workspace tree into one temporary directory,
+runs the command there, then syncs created and modified text files back to AFS.
+Use relative shell paths such as `src/README.md`; absolute shell paths keep
+their ordinary host meaning.
 
 Nonzero exit codes are returned in `exit_code`. Pass `check=True` to raise
 `AFSError` on nonzero exit.
@@ -410,7 +408,7 @@ Nonzero exit codes are returned in `exit_code`. Pass `check=True` to raise
 ```python
 result = fs.bash().exec(
     "python -m pytest",
-    cwd="foobar",
+    cwd=".",
     timeout=120.0,
 )
 
@@ -455,8 +453,6 @@ new code should use `workspace` language:
 ```python
 afs.repo
 afs.repos
-fs.repo_names
-fs.map_absolute_repo_paths(command)
 ```
 
 ## Current Limits

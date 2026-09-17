@@ -48,13 +48,13 @@ test("single-workspace mounts allow workspace-relative paths", async () => {
       throw new Error(`unexpected tool ${name}`);
     },
   };
-  const fs = new MountedFS([{ name: "foobar", token: "token", client: fakeClient }], { mode: "rw" });
+  const fs = new MountedFS({ name: "foobar", token: "token", client: fakeClient }, { mode: "rw" });
 
   await fs.writeFile("/src/README.md", "hello");
 
   assert.equal(files.get("/src/README.md"), "hello");
-  assert.equal(await fs.readFile("/foobar/src/README.md"), "hello");
-  assert.deepEqual(fs.workspaceNames, ["foobar"]);
+  assert.equal(await fs.readFile("/src/README.md"), "hello");
+  assert.equal(fs.workspaceName, "foobar");
 });
 
 test("delete removes a file and calls file_delete", async () => {
@@ -77,10 +77,10 @@ test("delete removes a file and calls file_delete", async () => {
       throw new Error(`unexpected tool ${name}`);
     },
   };
-  const fs = new MountedFS([{ name: "foobar", token: "token", client: fakeClient }], { mode: "rw" });
+  const fs = new MountedFS({ name: "foobar", token: "token", client: fakeClient }, { mode: "rw" });
 
   await fs.writeFile("/src/README.md", "hello");
-  const result = await fs.delete("/foobar/src/README.md");
+  const result = await fs.delete("/src/README.md");
 
   assert.deepEqual(result, { operation: "delete", kind: "file" });
   assert.equal(files.has("/src/README.md"), false);
@@ -168,4 +168,45 @@ test("checkpoint.create allows omitted checkpoint names", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].params.name, "checkpoint_create");
   assert.equal(calls[0].params.arguments.workspace, "repo");
+});
+
+
+test("mount root does not strip a directory matching the workspace name", async () => {
+  const calls = [];
+  const fs = new MountedFS({ name: "repo", token: "token", client: { async callTool(name, args) { calls.push([name, args]); return { content: "nested" }; } } }, { mode: "rw" });
+  assert.equal(await fs.readFile("/repo/file.txt"), "nested");
+  assert.equal(calls[0][1].path, "/repo/file.txt");
+});
+
+test("mount rejects the removed multiple workspace input", async () => {
+  const afs = new AFS({ apiKey: "test", fetch: async () => { throw new Error("must not call server"); } });
+  await assert.rejects(afs.fs.mount({ workspaces: [{ name: "a" }, { name: "b" }] }), /one workspace/);
+});
+
+test("fs.mount binds one token and materializes directly at its local root", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const calls = [];
+  const afs = new AFS({ apiKey: "account-token", fetch: async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    calls.push(body.params);
+    const name = body.params.name;
+    const values = {
+      mcp_token_issue: { token: "workspace-token" },
+      file_list: { entries: [{ name: "README.md", path: "/README.md", kind: "file" }] },
+      file_read: { content: "one tree", kind: "file" },
+      checkpoint_create: { workspace: "repo", checkpoint: "saved", created: true },
+    };
+    assert.ok(name in values);
+    return new Response(JSON.stringify({ result: { structuredContent: values[name] } }), { headers: { "content-type": "application/json" } });
+  } });
+  const fs = await afs.fs.mount({ workspace: "repo", mode: "rw-checkpoint" });
+  try {
+    const root = await fs.syncFromRemote();
+    assert.equal(await readFile(join(root, "README.md"), "utf8"), "one tree");
+    assert.deepEqual(await fs.checkpoint("saved"), { workspace: "repo", checkpoint: "saved", created: true });
+    assert.equal(calls[0].arguments.workspace, "repo");
+    assert.equal(calls[0].arguments.profile, "workspace-rw-checkpoint");
+    assert.equal(calls.filter(({ name }) => name === "mcp_token_issue").length, 1);
+  } finally { await fs.close(); }
 });

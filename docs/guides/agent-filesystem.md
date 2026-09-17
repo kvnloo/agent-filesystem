@@ -5,7 +5,8 @@ before you create workspaces, edit files, configure MCP, or run the AFS CLI.
 
 ## Core Model
 
-AFS is workspace-first. A workspace is a complete file tree for source code,
+One workspace owns one file tree and its checkpoints. There is no volume
+attachment or composition layer. A workspace is a complete file tree for source code,
 prompts, notes, generated files, logs, and agent scratch state.
 
 Redis is the canonical store for workspace metadata, manifests, blobs,
@@ -23,7 +24,8 @@ Remember these rules:
 
 - File edits change the live workspace state.
 - File edits do not automatically create checkpoints.
-- Checkpoints are explicit restore points.
+- Checkpoints are explicit restore points. A server-side checkpoint captures
+  published Redis state and cannot flush unsynchronized files on other clients.
 - Forks create a second workspace from another line of work.
 - The canonical starter workspace name is `getting-started`.
 - Use `Self-managed` in user-facing copy for the control-plane-backed mode.
@@ -68,16 +70,16 @@ local environment disappears before synchronization completes.
 
 Before ending a session that must preserve its changes, stop all application
 writes and all other writers
-to the remote volume, then run:
+to the remote workspace, then run:
 
 ```bash
-afs vol save --timeout 2m --json <volume-or-mount-directory>
+afs ws save --timeout 2m --json <workspace-or-mount-directory>
 ```
 
 Save covers one complete active sync mount, including changes whose watcher
 events were missed. It applies the mount's ignore rules. Success means the
 included tree's actual file bytes, types, permissions and symlink targets were
-verified against Redis. The JSON result includes the volume, local root, entry
+verified against Redis. The JSON result includes the workspace, local root, entry
 and file counts, byte count, tree SHA256 and completion time. Save attempts to
 resume normal synchronization after the operation. If resuming fails, save
 returns an error and the mount must be restarted. After a failed save, the

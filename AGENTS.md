@@ -19,7 +19,11 @@ section. Do not create a separate lessons file.
 
 ## Critical Invariants
 
-- AFS is workspace-first. Redis is the canonical store for workspace metadata, manifests, blobs, checkpoints, and activity.
+- One workspace owns one file tree and its checkpoints. Redis is the canonical
+  store for workspace metadata, manifests, blobs, checkpoints, and activity.
+- The former volume is the workspace; preserve its storage ID. Composition
+  records are migration evidence, not public workspaces. `/v2` composition
+  routes retire with HTTP 410 and must never reinterpret composition IDs.
 - Sync mode and live mounts are the supported local execution surfaces.
 - `afs mcp` exposes the same workspace model over stdio for agent clients.
 - Checkpoints are explicit. File edits change the live workspace state; they do not auto-create checkpoints.
@@ -182,6 +186,15 @@ The most important implementation seams are:
 
 ## Lessons Learned
 
+- Read-time materialization and MCP refresh must not clear the live dirty
+  marker or rewrite a previously fetched metadata record. Peer checkpoints
+  and writes may have moved the tree; only the guarded live checkpoint save
+  may acknowledge its captured generation and journal position.
+- Exact grep must bypass the legacy inode search projection for trees with a
+  generation marker. Current filesystem clients do not maintain those grep
+  fields; an old ready marker can miss edits, and unguarded backfill can
+  recreate an inode after restore. Use the published-tree scan until the
+  projection has its own guarded revision protocol.
 - After save stops a sync generation, a failed save must request recovery on
   the replacement watcher. Cancelled debounce timers and queued work will not
   produce another event by themselves. Keep tracked upload queue sends
@@ -209,28 +222,11 @@ The most important implementation seams are:
   `ui/src/foundation/tables/workspace-table.styles.ts`. Do not invent bespoke
   cards, inputs, rows, or CSS unless the needed component does not already exist
   in the project.
-- Agent-profile editing should use full pages with a breadcrumb back to the
-  list, not drawer-based flows, while preserving the same Filesystem / Tokens /
-  Settings structure.
-- The `/workspaces` UI is "Agent Workspaces" in page copy. On the list, the
-  mounted storage column is "Volumes" and counts should say volume/volumes, not
-  workspace/workspaces. Agent rows should use the agent/Bot icon with the
-  neutral table icon treatment, not colored avatars or letter-only avatars.
-- Agent Workspace editor pages should use standard input components and compact
-  table-like summaries. Avoid prototype-only borderless inputs, big metric
-  cards, and explanatory workspace cards in this flow.
-- Mounted folder rows in the Agent Workspace editor should read as filesystem
-  children under `/`, with indentation and connector lines from the root row.
-- Agent Workspace editor pages should keep the editable content, tabs, body,
-  and footer inside one main card below the breadcrumb.
-- The Agent Workspace filesystem action is "Add Volume". It opens a multi-select
-  wizard for existing volumes plus permissions, not an immediate "Add shared
-  folder" shortcut.
-- The Agent Workspace filesystem section should present a left-aligned
-  "Volumes" section title with the "Add Volume" action aligned to the right,
-  matching other table/action headers.
-- Volume/detail tab bars must stay inside their card. Use short tab labels and
-  horizontal tab scrolling instead of allowing tab controls to overflow or wrap.
+- Workspace pages retain the existing tree browser, content viewer, History,
+  checkpoints, and settings. Do not reintroduce attachment editors, composed
+  manifests, volume resources, or per-volume mount paths.
+- Workspace/detail tab bars must stay inside their card. Use short tab labels
+  and horizontal tab scrolling instead of allowing tab controls to overflow.
 - Tenant-scoped client routes must run through the same auth middleware as admin
   routes before they resolve workspace names. Otherwise bearer tokens do not
   attach an auth subject and duplicate workspace-name errors can expose
@@ -321,7 +317,7 @@ The most important implementation seams are:
   documents, and uses `--keyword` / `--semantic` for narrower modes. Do not
   reintroduce public `search` or `vsearch` commands unless the product direction
   changes again.
-- On the Volume details page, the merged file/lifecycle timeline is titled
+- On the Workspace details page, the merged file/lifecycle timeline is titled
   `History`. Do not expose `Changelog` as a peer tab or section title there.
 - Semantic query embeddings must use a real provider. QMD uses a local GGUF
   embedding model with explicit query/document formatting; deterministic hash
@@ -353,35 +349,30 @@ The most important implementation seams are:
 - Workspace file/query CLI calls use resolved workspace routes under
   `/v1/workspaces/<id>/...`; when adding a scoped database route, add the
   matching resolved route and a regression test for workspace IDs.
-- `afs ws mount <workspace>` must resolve the Agent Workspace manifest before
-  prompting for a local folder. Missing manifests should produce an Agent
-  Workspace error with `afs ws list`/`afs ws create` guidance, not a bare
-  file-not-found error.
-- Root `afs mount` and `afs unmount` are Agent Workspace shortcuts. They should
-  behave like `afs ws mount`/`afs ws unmount`, including no-arg prompts that
-  list Agent Workspaces, not raw volumes. Direct volume mounting remains under
-  `afs vol mount`/`afs vol unmount`.
-- `afs ws mount` should print one Agent Workspace summary. Suppress child
-  `Volume mounted` sections from the underlying per-volume mounts and show the
-  actual local mounted volume paths with read-only/read-write permissions and
-  file counts. Do not display logical `/workspace/volume` paths as if they are
-  filesystem roots.
+- `afs ws mount <workspace>` and root `afs mount` connect one workspace tree
+  directly to one local directory. The unmount shortcuts target that same tree
+  or local path. Prompts list independent workspaces.
+- `afs ws` owns create/import/list/show/config/fork/delete/save and mounts.
+  Public `vol`, attachment, and bookmark commands have been removed.
 - The root `afs help` screen should stay concise. Do not reintroduce a
   `Common Flows` section there.
-- `afs status` must aggregate child volume mount records tagged with
-  `agent_workspace_root` into one mounted Agent Workspace row. Do not list those
-  child volumes under Mounted workspaces; direct volume mounts belong in a
-  separate Mounted volumes section.
+- `afs status` shows each tree mount as a workspace, including old registry
+  entries with composition tags; keep each actual local path addressable.
 - Do not restart the user's running control plane automatically. Rebuild
   binaries when needed, but let the user restart `afs-control-plane`.
 - Self-managed `afs auth login --access-token` must preserve the CLI bearer
   token. Do not normalize self-managed access-token logins into unauthenticated
   local-control-plane access, or workspace-scoped mount tokens can list and
   mount workspaces outside their scope.
-- `afs tokens create --workspace <name>` is for Agent Workspace mounts. It must
-  mint against the Agent Workspace manifest route and authorize sessions only
-  for volumes attached to that manifest; do not route this command through the
-  lower-level volume workspace token path.
+- `afs tokens create --workspace <name>` uses the v1 workspace CLI-token route.
+  The token authorizes only that tree and must preserve read-only restrictions.
+  Never promote old composition tokens into unrestricted tree access.
+- SDK `fs.mount` accepts one `workspace`, exposes root-relative file API paths,
+  and materializes directly into one local directory. Shell commands use normal
+  relative paths in that directory; there is no virtual workspace-name prefix.
+- Server checkpoints capture published Redis state and do not flush every
+  client's pending local files. Local save and checkpoint creation are separate
+  operations.
 - Watcher overflow recovery must use a notification channel separate from the
   saturated event queue. Consume the request before scanning so losses during
   recovery schedule another pass. Refresh native directory watches and use a
@@ -406,3 +397,22 @@ When a rename stages an edited destination, capture the final provisional
 baseline version before enqueueing the rename. A missing remote path followed
 by a failed or obsolete content upload must recover the local destination;
 it must not treat that provisional baseline as proof of a remote deletion.
+
+- A production UI served on localhost uses its serving origin for API calls.
+  The localhost `:8091` fallback belongs only to Vite development mode.
+- Workspace route loaders use `loaderDeps.databaseId`; `search` is not a loader
+  argument. Wait for authentication readiness before warming detail routes.
+- Live Topology shows independent workspace nodes without a shared workspace
+  bounding box. Keep host grouping for agents; connection endpoints attach to
+  individual workspace nodes.
+- Import-lock heartbeats are advisory. Root cleanup, materialization, head
+  markers, and final generation publication must atomically validate both the
+  import token and replacement generation so a paused worker cannot overwrite
+  a newer tree after losing its lease.
+- A checkpoint can clear the root dirty marker only if its head, generation,
+  and captured mutation journal still match. Publish dirty markers and journal
+  entries atomically with mutations, including chmod and namespace operations;
+  disabling Pub/Sub must not disable the durable journal.
+- File mutation and read-refresh paths must not write a previously read whole
+  workspace metadata record back to Redis. Update the latest metadata under
+  concurrency checks so a concurrent checkpoint or restore head survives.

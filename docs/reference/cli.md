@@ -25,7 +25,7 @@ Primary commands:
 | `afs auth` | Log in, log out, and inspect authentication. |
 | `afs setup` | Configure the default local mode. |
 | `afs status` | Show AFS status and mounted workspaces. |
-| `afs vol save` | Save and verify one mounted sync volume in Redis. |
+| `afs ws save` | Save and verify one mounted sync workspace in Redis. |
 | `afs ws` | Create, list, mount, unmount, fork, delete, or import workspaces. |
 | `afs fs` | Read, search, and safely write workspace files. |
 | `afs cp` | Create, list, and restore checkpoints. |
@@ -125,16 +125,16 @@ afs tokens create --workspace <workspace> [--permission ro|rw] [--expires 30d]
 afs tokens create <workspace> [--permission ro|rw]
 ```
 
-Creates a CLI token scoped to one Agent Workspace for mount use. The default
+Creates a CLI token scoped to one workspace for mount use. The default
 permission is read-write. `--permission ro` creates a read-only mount token;
-when that token is used with `afs auth login --access-token`, every mounted
-volume session opened for that Agent Workspace is forced read-only.
+when that token is used with `afs auth login --access-token`, every mount
+session opened for that workspace is forced read-only.
 
 Flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--workspace <name|id>` | Agent Workspace the token may mount. |
+| `--workspace <name|id>` | Workspace the token may mount. |
 | `--use mount` | Token use. `mount` is currently the only supported value. |
 | `--permission ro\|rw` | Mount permission. Defaults to `rw`. |
 | `--expires <duration>` | Expiry such as `12h`, `30d`, `4w`, RFC3339, or `never`. |
@@ -149,9 +149,9 @@ afs auth login --url https://afs.example.com --access-token afs_cli_...
 afs ws mount coding-a ~/coding-a
 ```
 
-Workspace-scoped mount tokens can list only the Agent Workspace they are scoped
-to and can open client mount sessions only for volumes attached to that Agent
-Workspace. Use a normal account-scoped login token for account,
+Workspace-scoped mount tokens can list only their workspace and open mount
+sessions only for that workspace. A read-only token cannot request a writable
+session. Use a normal account-scoped login token for account,
 workspace-management, checkpoint, or MCP-token administration.
 
 ## First Run And Lifecycle
@@ -233,16 +233,16 @@ afs status [--verbose]
 Shows active mounts in aligned plain columns. Use `--verbose` to include
 control-plane, database, session, mount id, and process details.
 
-### `afs vol save`
+### `afs ws save`
 
 ```bash
-afs vol save [--timeout 2m] [--json] <volume|directory>
-afs vol save project --timeout 30s --json
-afs vol save /absolute/path/to/mounted-volume
+afs ws save [--timeout 2m] [--json] <workspace|directory>
+afs ws save project --timeout 30s --json
+afs ws save /absolute/path/to/mounted-workspace
 ```
 
-Stop all application writers and other writers to the remote volume before
-calling save. The target is a unique mounted volume name or ID, or the exact
+Stop all application writers and other writers to the remote workspace before
+calling save. The target is a unique mounted workspace name or ID, or the exact
 local mount directory. A child path does not select a subset. Registered
 mounts and the current config's legacy foreground or background sync process
 are supported. Use the matching global `--config` for a legacy process started
@@ -271,7 +271,7 @@ Save scans and reads back the whole included tree. Larger trees may need a
 longer timeout.
 
 Flags may appear before or after the target. JSON results include `success`
-and an `error` on failure. The `volume` and `local_root` fields are included
+and an `error` on failure. The `workspace` and `local_root` fields are included
 once the target is resolved. A successful result includes
 `save.entries`, `save.files`, `save.bytes`, `save.tree_sha256` and
 `save.completed_at`. Errors return a nonzero exit status.

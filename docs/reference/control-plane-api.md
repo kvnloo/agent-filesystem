@@ -247,12 +247,13 @@ Database-scoped equivalents are available under
 
 ### CLI Tokens
 
-- `POST /v2/workspaces/{workspace_id}/cli-tokens`
 - `POST /workspaces/{workspace_id}/cli-tokens`
 - `POST /databases/{database_id}/workspaces/{workspace_id}/cli-tokens`
 
-Use the `/v2/workspaces/{workspace_id}/cli-tokens` route for Agent Workspace
-mount tokens. The `/workspaces/...` routes are lower-level volume routes.
+These routes issue tokens for the single-tree workspace. Composition routes
+under `/v2/workspaces` are retired and return HTTP 410 Gone; composition IDs
+are never interpreted as tree IDs. Existing composition tokens are not converted
+into unrestricted workspace tokens.
 
 Workspace CLI token create requests accept:
 

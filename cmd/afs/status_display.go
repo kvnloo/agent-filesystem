@@ -481,55 +481,26 @@ func printMountStatus(reg mountRegistry, verbose bool) {
 		fmt.Println()
 		return
 	}
-	workspaces, volumes := mountStatusItems(reg.Mounts)
-	runningWorkspaces, stoppedWorkspaces := splitMountStatusItems(workspaces)
-	runningVolumes, stoppedVolumes := splitMountStatusItems(volumes)
-	if len(runningWorkspaces) > 0 {
-		fmt.Println()
-		fmt.Println("Mounted workspaces")
-		fmt.Println()
-		headers := mountStatusItemHeaders(runningWorkspaces, "Workspace")
-		printPlainTable(headers, mountStatusItemRows(runningWorkspaces))
-	} else if verbose && len(stoppedWorkspaces) > 0 {
-		fmt.Println()
-		fmt.Println("Mounted workspaces")
-		fmt.Println()
-		headers := mountStatusItemHeaders(stoppedWorkspaces, "Workspace")
-		printPlainTable(headers, mountStatusItemRows(stoppedWorkspaces))
-	} else if len(runningVolumes) == 0 {
-		fmt.Println()
-		fmt.Println("No mounted workspaces.")
+	workspaces := mountStatusItems(reg.Mounts)
+	running, stopped := splitMountStatusItems(workspaces)
+	if len(running) > 0 {
+		fmt.Print("\nMounted workspaces\n\n")
+		printPlainTable(mountStatusItemHeaders(running, "Workspace"), mountStatusItemRows(running))
+	} else {
+		fmt.Println("\nNo mounted workspaces.")
 	}
-	if len(runningVolumes) > 0 {
-		fmt.Println()
-		fmt.Println("Mounted volumes")
-		fmt.Println()
-		headers := mountStatusItemHeaders(runningVolumes, "Volume")
-		printPlainTable(headers, mountStatusItemRows(runningVolumes))
+	if len(stopped) > 0 {
+		fmt.Print("\nStopped workspace records\n\n")
+		printPlainTable(mountStatusItemHeaders(stopped, "Workspace"), mountStatusItemRows(stopped))
 	}
-	if len(stoppedWorkspaces) > 0 {
-		fmt.Println()
-		fmt.Println("Stopped workspace records")
-		fmt.Println()
-		headers := mountStatusItemHeaders(stoppedWorkspaces, "Workspace")
-		printPlainTable(headers, mountStatusItemRows(stoppedWorkspaces))
-	}
-	if len(stoppedVolumes) > 0 {
-		fmt.Println()
-		fmt.Println("Stopped volume records")
-		fmt.Println()
-		headers := mountStatusItemHeaders(stoppedVolumes, "Volume")
-		printPlainTable(headers, mountStatusItemRows(stoppedVolumes))
-	}
-	if !verbose {
-		fmt.Println()
-		return
-	}
-	for _, item := range append(append(append(runningWorkspaces, runningVolumes...), stoppedWorkspaces...), stoppedVolumes...) {
-		fmt.Println()
-		printMountStatusItemVerbose(item)
+	if verbose {
+		for _, item := range append(running, stopped...) {
+			fmt.Println()
+			printMountStatusItemVerbose(item)
+		}
 	}
 	fmt.Println()
+
 }
 
 type mountStatusItem struct {
@@ -545,39 +516,19 @@ type mountStatusItem struct {
 	Records              []mountRecord
 }
 
-func mountStatusItems(records []mountRecord) (workspaces []mountStatusItem, volumes []mountStatusItem) {
-	workspaceGroups := make(map[string][]mountRecord)
+func mountStatusItems(records []mountRecord) []mountStatusItem {
+	items := make([]mountStatusItem, 0, len(records))
 	for _, rec := range sortedMountRecords(records) {
-		if key := agentWorkspaceMountKey(rec); key != "" {
-			workspaceGroups[key] = append(workspaceGroups[key], rec)
-			continue
-		}
-		volumes = append(volumes, mountStatusItemFromRecords([]mountRecord{rec}, rec.Workspace, rec.LocalPath))
+		items = append(items, mountStatusItemFromRecords([]mountRecord{rec}, rec.Workspace, rec.LocalPath))
 	}
-	for _, group := range workspaceGroups {
-		name := strings.TrimSpace(group[0].AgentWorkspace)
-		if name == "" {
-			name = strings.TrimSpace(group[0].AgentWorkspaceID)
-		}
-		workspaces = append(workspaces, mountStatusItemFromRecords(group, name, group[0].AgentWorkspaceRoot))
-	}
-	sort.Slice(workspaces, func(i, j int) bool {
-		left := strings.ToLower(workspaces[i].Name)
-		right := strings.ToLower(workspaces[j].Name)
+	sort.Slice(items, func(i, j int) bool {
+		left, right := strings.ToLower(items[i].Name), strings.ToLower(items[j].Name)
 		if left == right {
-			return workspaces[i].Path < workspaces[j].Path
+			return items[i].Path < items[j].Path
 		}
 		return left < right
 	})
-	sort.Slice(volumes, func(i, j int) bool {
-		left := strings.ToLower(volumes[i].Name)
-		right := strings.ToLower(volumes[j].Name)
-		if left == right {
-			return volumes[i].Path < volumes[j].Path
-		}
-		return left < right
-	})
-	return workspaces, volumes
+	return items
 }
 
 func agentWorkspaceMountKey(rec mountRecord) string {
@@ -992,34 +943,9 @@ func printMountVerbose(rec mountRecord) {
 }
 
 func printMountStatusItemVerbose(item mountStatusItem) {
-	if len(item.Records) == 1 && agentWorkspaceMountKey(item.Records[0]) == "" {
-		printMountVerbose(item.Records[0])
-		return
+	for _, rec := range item.Records {
+		printMountVerbose(rec)
 	}
-	rows := []outputRow{
-		{Label: "workspace", Value: item.Name},
-		{Label: "status", Value: item.Status},
-		{Label: "mode", Value: fallbackString(item.Mode, "unknown")},
-		{Label: "path", Value: homeRelativeDisplayPath(item.Path)},
-		{Label: "volumes", Value: fmt.Sprintf("%d", len(item.Records))},
-	}
-	if source := mountStatusItemSource(item); strings.TrimSpace(source) != "" {
-		rows = append(rows, outputRow{Label: "config source", Value: source})
-	}
-	if db := mountStatusItemDatabase(item); db != "-" {
-		rows = append(rows, outputRow{Label: "database", Value: db})
-	}
-	for _, rec := range sortedMountRecords(item.Records) {
-		value := strings.TrimSpace(rec.Workspace)
-		if mountPath := strings.TrimSpace(rec.AgentWorkspacePath); mountPath != "" {
-			value += " " + mountPath
-		}
-		if path := strings.TrimSpace(rec.LocalPath); path != "" {
-			value += " -> " + homeRelativeDisplayPath(path)
-		}
-		rows = append(rows, outputRow{Label: "volume", Value: value})
-	}
-	printSection(item.Name, rows)
 }
 
 func fallbackString(value, fallback string) string {
@@ -1165,8 +1091,8 @@ func printReadyBox(cfg config, backendName, _ string) {
 	}
 	if backendName == mountBackendNone {
 		rows = append(rows, outputRow{})
-		rows = append(rows, outputRow{Label: "create", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" vol create <volume>")})
-		rows = append(rows, outputRow{Label: "import", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" vol import <volume> <directory>")})
+		rows = append(rows, outputRow{Label: "create", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" ws create <workspace>")})
+		rows = append(rows, outputRow{Label: "import", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" ws import <workspace> <directory>")})
 		printSection(title, rows)
 		return
 	}

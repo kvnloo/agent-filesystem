@@ -93,11 +93,7 @@ func (s *Service) RestoreFileVersion(ctx context.Context, workspace, rawPath str
 	if err := applySelectedVersionToWorkspacePath(ctx, s.store, workspace, fsClient, normalizedPath, stat, selected); err != nil {
 		return FileVersionRestoreResponse{}, err
 	}
-	if err := MarkWorkspaceRootDirty(ctx, s.store, storageID); err != nil {
-		return FileVersionRestoreResponse{}, err
-	}
-	meta.DirtyHint = true
-	if err := s.store.PutWorkspaceMeta(ctx, meta); err != nil {
+	if err := s.store.MarkWorkspaceDirtyHint(ctx, storageID); err != nil {
 		return FileVersionRestoreResponse{}, err
 	}
 
@@ -208,11 +204,7 @@ func (s *Service) UndeleteFileVersion(ctx context.Context, workspace, rawPath st
 	if err := applySelectedVersionToWorkspacePath(ctx, s.store, workspace, fsClient, normalizedPath, nil, selected); err != nil {
 		return FileVersionUndeleteResponse{}, err
 	}
-	if err := MarkWorkspaceRootDirty(ctx, s.store, storageID); err != nil {
-		return FileVersionUndeleteResponse{}, err
-	}
-	meta.DirtyHint = true
-	if err := s.store.PutWorkspaceMeta(ctx, meta); err != nil {
+	if err := s.store.MarkWorkspaceDirtyHint(ctx, storageID); err != nil {
 		return FileVersionUndeleteResponse{}, err
 	}
 
@@ -344,7 +336,7 @@ func applySelectedVersionToWorkspacePath(ctx context.Context, store *Store, work
 	switch version.Kind {
 	case FileVersionKindFile:
 		if stat != nil && stat.Type != "file" {
-			if err := fsClient.Rm(ctx, normalizedPath); err != nil {
+			if err := fsClient.Rm(afsclient.WithExpectedStat(ctx, stat), normalizedPath); err != nil {
 				return err
 			}
 			stat = nil
@@ -356,29 +348,29 @@ func applySelectedVersionToWorkspacePath(ctx context.Context, store *Store, work
 		if err != nil {
 			return err
 		}
-		if stat == nil {
-			if err := fsClient.EchoCreate(ctx, normalizedPath, data, max(version.Mode, 0o644)); err != nil {
-				return err
+		mode := version.Mode
+		if mode == 0 {
+			if stat != nil {
+				mode = stat.Mode
+			} else {
+				mode = 0644
 			}
-		} else if err := fsClient.Echo(ctx, normalizedPath, data); err != nil {
+		}
+		if err := fsClient.EchoCreate(afsclient.WithExpectedStat(ctx, stat), normalizedPath, data, mode); err != nil {
 			return err
 		}
-		if version.Mode != 0 {
-			if err := fsClient.Chmod(ctx, normalizedPath, version.Mode); err != nil {
-				return err
-			}
-		}
+
 		return nil
 	case FileVersionKindSymlink:
 		if stat != nil {
-			if err := fsClient.Rm(ctx, normalizedPath); err != nil {
+			if err := fsClient.Rm(afsclient.WithExpectedStat(ctx, stat), normalizedPath); err != nil {
 				return err
 			}
 		}
 		if err := ensureVersionedParentDirs(ctx, fsClient, normalizedPath); err != nil {
 			return err
 		}
-		return fsClient.Ln(ctx, version.Target, normalizedPath)
+		return fsClient.Ln(afsclient.WithExpectedStat(ctx, nil), version.Target, normalizedPath)
 	default:
 		return fmt.Errorf("unsupported restore version kind %q", version.Kind)
 	}

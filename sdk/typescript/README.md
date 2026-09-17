@@ -19,13 +19,13 @@ const afs = new AFS({ apiKey: process.env.AFS_API_KEY });
 const workspace = await afs.workspace.create({ name: "foobar" });
 
 const fs = await afs.fs.mount({
-  workspaces: [{ name: workspace.name }],
+  workspace: workspace.name,
   mode: "rw",
 });
 
 try {
   await fs.writeFile("/src/README.md", "hello world");
-  const result = await fs.bash().exec("cat /foobar/src/README.md");
+  const result = await fs.bash().exec("cat src/README.md");
   console.log(result.stdout);
 } finally {
   await fs.close();

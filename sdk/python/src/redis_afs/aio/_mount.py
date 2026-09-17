@@ -6,12 +6,11 @@ import asyncio
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .._paths import MountTable
 from .._paths import normalize_remote_path as _normalize_remote_path
 from ..errors import AFSError
 from ..models import BashResult
@@ -28,28 +27,22 @@ class _AsyncMountedWorkspace:
 class AsyncMountedFS:
     def __init__(
         self,
-        workspaces: Sequence[_AsyncMountedWorkspace],
+        workspace: _AsyncMountedWorkspace,
         *,
         mode: str = "rw",
         concurrency: int = 16,
     ) -> None:
-        self._workspaces = list(workspaces)
-        self._workspaces_by_name = {workspace.name: workspace for workspace in self._workspaces}
-        if len(self._workspaces_by_name) != len(self._workspaces):
-            raise AFSError("workspaces must be mounted at most once")
+        if not isinstance(workspace, _AsyncMountedWorkspace):
+            raise AFSError("mount requires one workspace")
+        self._workspace = workspace
         self.mode = mode
-        self._table = MountTable(self.workspace_names)
         self._local_root: tempfile.TemporaryDirectory[str] | None = None
         self._concurrency = concurrency
         self._semaphore = asyncio.Semaphore(concurrency)
 
     @property
-    def repo_names(self) -> list[str]:
-        return self.workspace_names
-
-    @property
-    def workspace_names(self) -> list[str]:
-        return [workspace.name for workspace in self._workspaces]
+    def workspace_name(self) -> str:
+        return self._workspace.name
 
     @property
     def local_root(self) -> str | None:
@@ -69,7 +62,7 @@ class AsyncMountedFS:
         text = content.decode("utf-8") if isinstance(content, bytes) else content
         await workspace.client.call_tool("file_write", {"path": remote_path, "content": text})
         if self.local_root:
-            local_path = self._local_path_for(workspace.name, remote_path)
+            local_path = self._local_path_for(remote_path)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text(text, encoding="utf-8")
 
@@ -100,7 +93,7 @@ class AsyncMountedFS:
         workspace, remote_path = self._resolve(path)
         response = await workspace.client.call_tool("file_delete", {"path": remote_path})
         if self.local_root:
-            local_path = self._local_path_for(workspace.name, remote_path)
+            local_path = self._local_path_for(remote_path)
             if local_path.is_dir() and not local_path.is_symlink():
                 shutil.rmtree(local_path, ignore_errors=True)
             else:
@@ -110,43 +103,30 @@ class AsyncMountedFS:
                     pass
         return response
 
-    async def checkpoint(self, name: str | None = None) -> list[dict[str, Any]]:
-        return [
-            await workspace.client.call_tool("checkpoint_create", {"checkpoint": name})
-            for workspace in self._workspaces
-        ]
+    async def checkpoint(self, name: str | None = None) -> dict[str, Any]:
+        return await self._workspace.client.call_tool("checkpoint_create", {"checkpoint": name})
 
     def bash(self) -> AsyncBashRunner:
         return AsyncBashRunner(self)
 
     async def sync_from_remote(self) -> str:
-        root = self._ensure_local_root()
-        for workspace in self._workspaces:
-            workspace_root = Path(root, workspace.name)
-            shutil.rmtree(workspace_root, ignore_errors=True)
-            workspace_root.mkdir(parents=True, exist_ok=True)
-            await _TreeSync(workspace.client, self._semaphore).pull("/", workspace_root)
-        return root
+        root = Path(self._ensure_local_root())
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        await _TreeSync(self._workspace.client, self._semaphore).pull("/", root)
+        return str(root)
 
     async def sync_to_remote(self) -> None:
-        if not self.local_root:
-            return
-        for workspace in self._workspaces:
-            workspace_root = Path(self.local_root, workspace.name)
-            if workspace_root.exists():
-                await _TreeSync(workspace.client, self._semaphore).push(workspace_root, "/")
+        if self.local_root:
+            await _TreeSync(self._workspace.client, self._semaphore).push(Path(self.local_root), "/")
 
     async def aclose(self) -> None:
-        results = await asyncio.gather(
-            *(workspace.client.aclose() for workspace in self._workspaces),
-            return_exceptions=True,
-        )
-        if self._local_root:
-            self._local_root.cleanup()
-            self._local_root = None
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        try:
+            await self._workspace.client.aclose()
+        finally:
+            if self._local_root:
+                self._local_root.cleanup()
+                self._local_root = None
 
     async def __aenter__(self) -> AsyncMountedFS:
         return self
@@ -154,28 +134,19 @@ class AsyncMountedFS:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         await self.aclose()
 
-    def map_absolute_workspace_paths(self, command: str) -> str:
-        if not self.local_root:
-            return command
-        return self._table.map_absolute(command, self.local_root)
-
-    def map_absolute_repo_paths(self, command: str) -> str:
-        return self.map_absolute_workspace_paths(command)
-
     def _resolve(self, raw_path: str) -> tuple[_AsyncMountedWorkspace, str]:
-        name, remote_path = self._table.resolve(raw_path)
-        return self._workspaces_by_name[name], remote_path
+        return self._workspace, _normalize_remote_path(raw_path)
 
     def _ensure_local_root(self) -> str:
         if not self._local_root:
             self._local_root = tempfile.TemporaryDirectory(prefix="afs-fs-")
         return self._local_root.name
 
-    def _local_path_for(self, workspace_name: str, remote_path: str) -> Path:
+    def _local_path_for(self, remote_path: str) -> Path:
         if not self.local_root:
             raise AFSError("mount has not been materialized locally yet")
         relative = _normalize_remote_path(remote_path).lstrip("/")
-        return Path(self.local_root, workspace_name, relative)
+        return Path(self.local_root, relative)
 
 
 class AsyncBashRunner:
@@ -196,7 +167,7 @@ class AsyncBashRunner:
         # async API's contract; the sync client raises subprocess.TimeoutExpired, but we
         # intentionally surface the asyncio-native exception here.
         root = await self._fs.sync_from_remote()
-        mapped_command = self._fs.map_absolute_workspace_paths(command)
+        mapped_command = command
         run_env: MutableMapping[str, str] = dict(os.environ)
         if env:
             for key, value in env.items():

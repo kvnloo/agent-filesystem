@@ -3,468 +3,335 @@ package client
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
+	"strings"
 
 	"github.com/redis/agent-filesystem/internal/rediscontent"
 	"github.com/redis/go-redis/v9"
 )
 
-func (c *nativeClient) StatInode(ctx context.Context, inode uint64) (*StatResult, error) {
-	data, err := c.loadInodeByID(ctx, strconv.FormatUint(inode, 10))
+type nativeRangeKey struct{}
+
+// Resolve live parent/name links in one Redis command. Stored indexed paths
+// are hints updated after rename and must not identify an NFS file handle.
+var inodePathScript = redis.NewScript(`
+if ARGV[4] ~= '' and redis.call('GET',KEYS[2]) ~= ARGV[4] then return -2 end
+if KEYS[3] ~= KEYS[2] and redis.call('EXISTS',KEYS[3]) == 0 then return -5 end
+local id=ARGV[3]
+local parts={}
+local seen={}
+while id~='1' do
+ if seen[id] or #parts>=4096 then return -1 end
+ seen[id]=true
+ local parent=redis.call('HGET',ARGV[1]..id,'parent')
+ local name=redis.call('HGET',ARGV[1]..id,'name')
+ if not parent or not name or redis.call('HGET',ARGV[2]..parent,name)~=id then return -1 end
+ table.insert(parts,1,name)
+ id=parent
+end
+if redis.call('EXISTS',ARGV[1]..'1')==0 then return -1 end
+return '/'..table.concat(parts,'/')
+`)
+
+func (c *nativeClient) InodePath(ctx context.Context, inode uint64) (string, error) {
+	generation, _ := ctx.Value(workspaceGenerationKey{}).(string)
+	result, err := inodePathScript.Run(ctx, c.rdb, []string{c.keys.inode(strconv.FormatUint(inode, 10)), c.keys.generation(), c.leaseGuardKey(ctx)}, c.keys.inodePrefix(), c.keys.direntsPrefix(), strconv.FormatUint(inode, 10), generation).Result()
 	if err != nil {
+		return "", err
+	}
+	if path, ok := result.(string); ok {
+		return path, nil
+	}
+	if code, ok := result.(int64); ok {
+		if code == -2 {
+			return "", ErrWorkspaceChanged
+		}
+		if code == -5 {
+			return "", ErrNativeSessionLost
+		}
+	}
+	return "", ErrNotFound
+}
+
+func (c *nativeClient) StatInode(ctx context.Context, inode uint64) (*StatResult, error) {
+	if err := c.checkGeneration(ctx); err != nil {
 		return nil, err
 	}
-	if data == nil {
-		return nil, nil
+	data, err := c.loadInodeByID(ctx, strconv.FormatUint(inode, 10))
+	if err != nil || data == nil {
+		return nil, err
 	}
 	return data.toStat(), nil
 }
 
 func (c *nativeClient) ReadInodeAt(ctx context.Context, inode uint64, off int64, size int) ([]byte, error) {
-	if off < 0 {
-		return nil, errors.New("invalid offset")
+	if off < 0 || size < 0 || int64(size) > math.MaxInt64-off {
+		return nil, errors.New("invalid range")
 	}
-	if size <= 0 {
-		return []byte{}, nil
-	}
-	data, err := c.loadInodeByID(ctx, strconv.FormatUint(inode, 10))
-	if err != nil {
-		return nil, err
-	}
-	if data == nil {
-		return nil, ErrNotFound
-	}
-	if data.Type != "file" {
-		return nil, ErrNotFile
-	}
-	if off >= data.Size {
-		return []byte{}, nil
-	}
-	if data.ContentRef == rediscontent.RefArray {
-		return rediscontent.ReadRange(ctx, c.rdb, c.keys.content(data.ID), rediscontent.RefArray, data.Size, off, size)
-	}
-	if data.ContentRef != rediscontent.RefExternal {
-		content, err := c.loadContentExternal(ctx, data.ID, data.ContentRef)
+	id := strconv.FormatUint(inode, 10)
+	for attempt := 0; attempt < 16; attempt++ {
+		if err := c.checkGeneration(ctx); err != nil {
+			return nil, err
+		}
+		data, err := c.loadInodeByID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		end := off + int64(size)
-		if end > int64(len(content)) {
-			end = int64(len(content))
+		if data == nil {
+			return nil, ErrNotFound
 		}
-		return []byte(content[off:end]), nil
+		if data.Type != "file" {
+			return nil, ErrNotFile
+		}
+		var result []byte
+		if off < data.Size && size != 0 {
+			if isExternalContentRef(data.ContentRef) {
+				result, err = rediscontent.ReadRange(ctx, c.rdb, c.keys.content(id), data.ContentRef, data.Size, off, size)
+			} else {
+				var raw string
+				raw, err = c.loadContentExternal(ctx, id, data.ContentRef)
+				if off < int64(len(raw)) {
+					result = []byte(raw[off:min(int64(len(raw)), off+int64(size))])
+				}
+			}
+		}
+		// Metadata and range bytes must describe one publication. This also
+		// covers multi-command Array reads and a concurrent content-ref change.
+		current, readErr := c.loadInodeByID(ctx, id)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if current == nil {
+			return nil, ErrNotFound
+		}
+		if current.Revision != data.Revision {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := c.checkGeneration(ctx); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
-
-	end := off + int64(size) - 1
-	if end >= data.Size {
-		end = data.Size - 1
-	}
-	chunk, err := c.rdb.GetRange(ctx, c.keys.content(data.ID), off, end).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, err
-	}
-	return []byte(chunk), nil
+	return nil, ErrWriteConflict
 }
 
-// WriteInodeAt is the legacy entry point; callers that do not know the path
-// still invalidate the entire path cache as a precaution. NFS callers should
-// use WriteInodeAtPath instead to update the cache entry in place.
 func (c *nativeClient) WriteInodeAt(ctx context.Context, inode uint64, payload []byte, off int64) error {
 	return c.WriteInodeAtPath(ctx, inode, "", payload, off)
 }
 
-// WriteInodeAtPath writes `payload` at `off` into the file with the given
-// inode. When `path` is non-empty, the updated metadata is cached under that
-// path and the entire path cache is preserved (no prefix invalidation).
-//
-// External-content files now stay on the byte-range path: we use GETRANGE /
-// SETRANGE against afs:{fs}:content:{inode} and only touch inode metadata in
-// the HASH. Small files still refresh search fields from the updated content;
-// large files flip to the "large" search state without reloading the whole
-// object into Go.
 func (c *nativeClient) WriteInodeAtPath(ctx context.Context, inode uint64, path string, payload []byte, off int64) error {
-	if off < 0 {
-		return errors.New("invalid offset")
+	if off < -1 || (off >= 0 && int64(len(payload)) > math.MaxInt64-off) {
+		return errors.New("invalid range")
 	}
-
-	id := strconv.FormatUint(inode, 10)
-	data, err := c.loadInodeByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if data == nil {
-		return ErrNotFound
-	}
-	if data.Type != "file" {
-		return ErrNotFile
-	}
-	beforeSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-	if snapErr != nil {
-		return snapErr
-	}
-	if err := c.ensurePreferredContentForRangeIO(ctx, data); err != nil {
-		return err
-	}
-
-	oldSize := data.Size
-	newSize := oldSize
-	if len(payload) > 0 {
-		end := off + int64(len(payload))
-		if end > newSize {
-			newSize = end
-		}
-	}
-	delta := newSize - oldSize
-	now := nowMs()
-	data.Size = newSize
-	data.MtimeMs = now
-	data.AtimeMs = now
-	if data.ContentRef == "" {
-		data.ContentRef = rediscontent.RefExternal
-	}
-
-	fields := c.inodeFields(data, false)
-	if path != "" {
-		fields = c.inodeFieldsAtPath(data, path, false)
-	}
-
-	if len(payload) == 0 {
-		if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields), delta); err != nil {
-			return err
-		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	var searchFields map[string]interface{}
-	if data.ContentRef == rediscontent.RefArray {
-		if err := rediscontent.WriteRange(ctx, c.rdb, c.keys.content(data.ID), off, payload); err != nil {
-			return err
-		}
-		if newSize <= fileSearchMaxIndexedBytes {
-			content, err := rediscontent.Load(ctx, c.rdb, c.keys.content(data.ID), rediscontent.RefArray, newSize)
-			if err != nil {
-				return err
-			}
-			searchFields = fileSearchIndexFields(string(content))
-		} else {
-			searchFields = map[string]interface{}{
-				"search_state":  fileSearchStateLarge,
-				"grep_grams_ci": "",
-			}
-		}
-		if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields, searchFields), delta); err != nil {
-			return err
-		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if newSize <= fileSearchMaxIndexedBytes {
-		before := ""
-		if oldSize > 0 {
-			pipe := c.rdb.Pipeline()
-			beforeCmd := pipe.GetRange(ctx, c.keys.content(data.ID), 0, oldSize-1)
-			pipe.SetRange(ctx, c.keys.content(data.ID), off, string(payload))
-			if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-				return err
-			}
-			before = beforeCmd.Val()
-		} else if err := c.rdb.SetRange(ctx, c.keys.content(data.ID), off, string(payload)).Err(); err != nil {
-			return err
-		}
-		searchFields = fileSearchIndexFields(applyRangeWrite(before, payload, off))
-	} else {
-		searchFields = map[string]interface{}{
-			"search_state":  fileSearchStateLarge,
-			"grep_grams_ci": "",
-		}
-		pipe := c.rdb.Pipeline()
-		pipe.SetRange(ctx, c.keys.content(data.ID), off, string(payload))
-		pipe.HSet(ctx, c.keys.inode(data.ID), mergeFieldMaps(fields, searchFields))
-		if delta != 0 {
-			pipe.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta)
-		}
-		pipe.Set(ctx, c.keys.rootDirty(), "1", 0)
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-		if err := c.finishRangeWriteCache(ctx, data, path); err != nil {
-			return err
-		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields, searchFields), delta); err != nil {
-		return err
-	}
-	afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-	if snapErr != nil {
-		return snapErr
-	}
-	if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-		return err
-	}
-	return nil
+	return c.changeInodeRange(ctx, inode, path, payload, off, -1)
 }
 
-// TruncateInode is the legacy entry point. Prefer TruncateInodeAtPath from
-// the NFS layer so the path cache survives the truncate.
 func (c *nativeClient) TruncateInode(ctx context.Context, inode uint64, size int64) error {
 	return c.TruncateInodeAtPath(ctx, inode, "", size)
 }
 
-// TruncateInodeAtPath updates the external content key in-place when the file
-// grows, and rewrites only the kept prefix when it shrinks.
 func (c *nativeClient) TruncateInodeAtPath(ctx context.Context, inode uint64, path string, size int64) error {
 	if size < 0 {
 		return errors.New("invalid size")
 	}
+	return c.changeInodeRange(ctx, inode, path, nil, 0, size)
+}
 
+// Range requests are operations, not full-file snapshots. A rejected CAS can
+// safely reapply the same range to a fresh private copy. Explicit expected-stat
+// callers instead keep their original conflict boundary, like folder sync.
+func (c *nativeClient) changeInodeRange(ctx context.Context, inode uint64, pathHint string, payload []byte, off, truncate int64) error {
 	id := strconv.FormatUint(inode, 10)
-	data, err := c.loadInodeByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	if data == nil {
-		return ErrNotFound
-	}
-	if data.Type != "file" {
-		return ErrNotFile
-	}
-	beforeSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-	if snapErr != nil {
-		return snapErr
-	}
-	if err := c.ensurePreferredContentForRangeIO(ctx, data); err != nil {
-		return err
-	}
-
-	delta := size - data.Size
-	oldSize := data.Size
-	data.Size = size
-	now := nowMs()
-	data.MtimeMs = now
-	data.AtimeMs = now
-	if data.ContentRef == "" {
-		data.ContentRef = rediscontent.RefExternal
-	}
-
-	fields := c.inodeFields(data, false)
-	if path != "" {
-		fields = c.inodeFieldsAtPath(data, path, false)
-	}
-
-	if delta == 0 {
-		if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields), 0); err != nil {
+	ctx = context.WithValue(ctx, nativeRangeKey{}, true)
+	for attempt := 0; attempt < 32; attempt++ {
+		if err := c.checkGeneration(ctx); err != nil {
 			return err
 		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
+		data, err := c.loadInodeByID(ctx, id)
+		if err != nil {
 			return err
 		}
-		return nil
-	}
-
-	var searchFields map[string]interface{}
-	if data.ContentRef == rediscontent.RefArray {
-		if err := rediscontent.Truncate(ctx, c.rdb, c.keys.content(data.ID), oldSize, size); err != nil {
+		if data == nil {
+			return ErrNotFound
+		}
+		if data.Type != "file" {
+			return ErrNotFile
+		}
+		if err := checkWriteCondition(ctx, data, false); err != nil {
 			return err
 		}
-		if size <= fileSearchMaxIndexedBytes {
-			content, err := rediscontent.Load(ctx, c.rdb, c.keys.content(data.ID), rediscontent.RefArray, size)
-			if err != nil {
-				return err
+		// The inode's current path wins over an open handle's stale hint. The
+		// inode/link checks in publication still prevent resurrection on unlink.
+		p, err := c.InodePath(ctx, inode)
+		if err != nil {
+			return err
+		}
+		oldSize := data.Size
+		writeOffset := off
+		if writeOffset == -1 {
+			writeOffset = oldSize
+		}
+		if int64(len(payload)) > math.MaxInt64-writeOffset {
+			return errors.New("invalid range")
+		}
+		newSize := oldSize
+		if truncate >= 0 {
+			newSize = truncate
+		} else if len(payload) > 0 {
+			newSize = max(newSize, writeOffset+int64(len(payload)))
+		}
+		if (truncate >= 0 && newSize == oldSize) || (truncate < 0 && len(payload) == 0) {
+			return nil
+		}
+		before, err := c.versionedSnapshotFromResolved(ctx, p, data)
+		if err != nil {
+			return err
+		}
+		var after VersionedSnapshot
+		stage, err := c.stageInodeRange(ctx, data, payload, writeOffset, newSize)
+		if err == nil {
+			data.Size = newSize
+			data.MtimeMs = nowMs()
+			data.AtimeMs = data.MtimeMs
+			data.CtimeMs = data.MtimeMs
+			if c.observer != nil {
+				content, readErr := rediscontent.Load(ctx, c.rdb, stage, data.ContentRef, newSize)
+				if readErr != nil {
+					c.discardStage(stage)
+					return readErr
+				}
+				after = VersionedSnapshot{Path: p, Exists: true, Kind: "file", Mode: data.Mode, Content: content, SizeBytes: newSize}
 			}
-			searchFields = fileSearchIndexFields(string(content))
+			// A byte-range update invalidates hashes from the previous complete
+			// chunk upload; retaining them could make a sync client skip changed data.
+			err = c.publishStagedFile(ctx, p, data, stage, false, map[string]interface{}{"chunk_size": 0, "chunk_hashes": ""})
+		}
+		if stage != "" {
+			c.discardStage(stage)
+		}
+		if err == nil {
+			// Keep warm ancestor/path caches: only this inode's attributes and
+			// its parent's listing became stale. A supplied old handle path is
+			// invalidated too, but is never used to publish or recache an inode.
+			if c.cache != nil {
+				c.cache.Invalidate(p)
+				c.cache.Invalidate(dirCacheKey(parentOf(p)))
+				if pathHint != "" && pathHint != p {
+					c.cache.Invalidate(normalizePath(pathHint))
+				}
+			}
+			return c.recordVersionMutation(ctx, before, after)
+		}
+		if !errors.Is(err, ErrWriteConflict) {
+			return err
+		}
+		if _, conditional := ctx.Value(expectedStatKey{}).(expectedStat); conditional {
+			return err
+		}
+	}
+	return ErrWriteConflict
+}
+
+// Redis COPY keeps unchanged bytes on the server. All writes target a unique,
+// expiring stage; only the shared revision-checked publication touches live data.
+func (c *nativeClient) stageInodeRange(ctx context.Context, inode *inodeData, payload []byte, off, newSize int64) (string, error) {
+	stage := c.keys.content(inode.ID) + ":stage:" + newOriginID()
+	originalRef := inode.ContentRef
+	if err := c.selectContentRef(ctx, inode); err != nil {
+		return stage, err
+	}
+	pipe := c.rdb.TxPipeline()
+	if isExternalContentRef(originalRef) && originalRef == inode.ContentRef && inode.Size > 0 {
+		copy := pipe.Copy(ctx, c.keys.content(inode.ID), stage, 0, true)
+		pipe.Expire(ctx, stage, publicationTTL)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return stage, err
+		}
+		if copy.Val() == 0 {
+			return stage, ErrWriteConflict
+		}
+	} else {
+		var content string
+		var err error
+		if inode.Size > 0 {
+			content, err = c.loadContentExternal(ctx, inode.ID, originalRef)
+		}
+		if err != nil {
+			return stage, c.rangeStageError(ctx, inode, err)
+		}
+		if inode.ContentRef == rediscontent.RefArray && content == "" {
+			pipe.Do(ctx, "ARSET", stage, 0, "")
 		} else {
-			searchFields = map[string]interface{}{
-				"search_state":  fileSearchStateLarge,
-				"grep_grams_ci": "",
+			rediscontent.QueueWriteFull(ctx, pipe, stage, inode.ContentRef, []byte(content))
+		}
+		pipe.Expire(ctx, stage, publicationTTL)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return stage, err
+		}
+	}
+	if inode.ContentRef == rediscontent.RefArray {
+		if len(payload) > 0 {
+			if err := rediscontent.WriteRangeWithTTL(ctx, c.rdb, stage, off, payload, publicationTTL); err != nil {
+				return stage, c.rangeStageError(ctx, inode, err)
 			}
 		}
-		if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields, searchFields), delta); err != nil {
-			return err
-		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	switch {
-	case size < oldSize:
-		truncated := ""
-		if size > 0 {
-			var err error
-			truncated, err = c.rdb.GetRange(ctx, c.keys.content(data.ID), 0, size-1).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return err
+		if newSize < inode.Size {
+			if err := rediscontent.TruncateWithTTL(ctx, c.rdb, stage, inode.Size, newSize, publicationTTL); err != nil {
+				return stage, err
 			}
 		}
-		if err := c.rdb.Set(ctx, c.keys.content(data.ID), truncated, 0).Err(); err != nil {
-			return err
-		}
-		if size <= fileSearchMaxIndexedBytes {
-			searchFields = fileSearchIndexFields(truncated)
-		} else {
-			searchFields = map[string]interface{}{
-				"search_state":  fileSearchStateLarge,
-				"grep_grams_ci": "",
+	} else {
+		if len(payload) > 0 {
+			if err := c.writeStringStageRange(ctx, stage, off, string(payload)); err != nil {
+				return stage, c.rangeStageError(ctx, inode, err)
 			}
 		}
-	case size <= fileSearchMaxIndexedBytes:
-		before := ""
-		if oldSize > 0 {
-			pipe := c.rdb.Pipeline()
-			beforeCmd := pipe.GetRange(ctx, c.keys.content(data.ID), 0, oldSize-1)
-			pipe.SetRange(ctx, c.keys.content(data.ID), size-1, "\x00")
-			if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-				return err
+		if newSize < inode.Size {
+			// Shrink inside Redis, without downloading the retained prefix.
+			if err := shrinkStringStage.Run(ctx, c.rdb, []string{stage}, newSize, publicationTTL.Milliseconds()).Err(); err != nil {
+				return stage, err
 			}
-			before = beforeCmd.Val()
-		} else if err := c.rdb.SetRange(ctx, c.keys.content(data.ID), size-1, "\x00").Err(); err != nil {
-			return err
+		} else if newSize > inode.Size && len(payload) == 0 {
+			if err := c.writeStringStageRange(ctx, stage, newSize-1, "\x00"); err != nil {
+				return stage, err
+			}
 		}
-		searchFields = fileSearchIndexFields(resizeRangeContent(before, size))
-	default:
-		pipe := c.rdb.Pipeline()
-		pipe.SetRange(ctx, c.keys.content(data.ID), size-1, "\x00")
-		pipe.HSet(ctx, c.keys.inode(data.ID), mergeFieldMaps(fields, map[string]interface{}{
-			"search_state":  fileSearchStateLarge,
-			"grep_grams_ci": "",
-		}))
-		pipe.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta)
-		pipe.Set(ctx, c.keys.rootDirty(), "1", 0)
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
+	}
+	if newSize == 0 {
+		if err := c.rdb.Set(ctx, stage, "", publicationTTL).Err(); err != nil {
+			return stage, err
 		}
-		if err := c.finishRangeWriteCache(ctx, data, path); err != nil {
-			return err
-		}
-		afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
+	}
+	return stage, nil
+}
+
+func (c *nativeClient) writeStringStageRange(ctx context.Context, stage string, off int64, payload string) error {
+	_, err := c.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.SetRange(ctx, stage, off, payload)
+		pipe.Expire(ctx, stage, publicationTTL)
 		return nil
-	}
-
-	if err := c.finishRangeWrite(ctx, data, path, mergeFieldMaps(fields, searchFields), delta); err != nil {
-		return err
-	}
-	afterSnapshot, snapErr := c.versionedSnapshotForCurrentInode(ctx, data.ID, path)
-	if snapErr != nil {
-		return snapErr
-	}
-	if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-		return err
-	}
-	return nil
+	})
+	return err
 }
 
-func (c *nativeClient) ensurePreferredContentForRangeIO(ctx context.Context, inode *inodeData) error {
-	if inode == nil || inode.Type != "file" {
-		return nil
-	}
-	preferredRef, err := c.preferredContentRef(ctx)
-	if err != nil {
-		return err
-	}
-	if inode.ContentRef == preferredRef {
-		return nil
-	}
-	content, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
-	if err != nil {
-		return err
-	}
-	pipe := c.rdb.Pipeline()
-	rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(inode.ID), preferredRef, []byte(content))
-	pipe.HSet(ctx, c.keys.inode(inode.ID), mergeFieldMaps(map[string]interface{}{
-		"content_ref": preferredRef,
-	}, fileSearchIndexFields(content)))
-	pipe.HDel(ctx, c.keys.inode(inode.ID), "content")
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-	inode.ContentRef = preferredRef
-	return nil
-}
+var shrinkStringStage = redis.NewScript(`
+local size=tonumber(ARGV[1])
+local data=''
+if size>0 then data=redis.call('GETRANGE',KEYS[1],0,size-1) end
+redis.call('SET',KEYS[1],data,'PX',ARGV[2])
+return 1
+`)
 
-func applyRangeWrite(existing string, payload []byte, off int64) string {
-	end := off + int64(len(payload))
-	buf := []byte(existing)
-	if end > int64(len(buf)) {
-		grown := make([]byte, end)
-		copy(grown, buf)
-		buf = grown
+func (c *nativeClient) rangeStageError(ctx context.Context, inode *inodeData, cause error) error {
+	if strings.Contains(cause.Error(), "WRONGTYPE") {
+		current, err := c.loadInodeByID(ctx, inode.ID)
+		if err == nil && (current == nil || current.Revision != inode.Revision) {
+			return ErrWriteConflict
+		}
 	}
-	copy(buf[off:end], payload)
-	return string(buf)
-}
-
-func resizeRangeContent(existing string, size int64) string {
-	buf := []byte(existing)
-	switch {
-	case int64(len(buf)) > size:
-		return string(buf[:size])
-	case int64(len(buf)) < size:
-		grown := make([]byte, size)
-		copy(grown, buf)
-		return string(grown)
-	default:
-		return existing
-	}
-}
-
-func (c *nativeClient) finishRangeWrite(ctx context.Context, data *inodeData, path string, fields map[string]interface{}, delta int64) error {
-	pipe := c.rdb.Pipeline()
-	pipe.HSet(ctx, c.keys.inode(data.ID), fields)
-	c.queueQueryDirty(ctx, pipe, data.ID)
-	if delta != 0 {
-		pipe.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta)
-	}
-	pipe.Set(ctx, c.keys.rootDirty(), "1", 0)
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-	return c.finishRangeWriteCache(ctx, data, path)
-}
-
-func (c *nativeClient) finishRangeWriteCache(ctx context.Context, data *inodeData, path string) error {
-	if path != "" {
-		c.cachePath(path, data)
-		c.publishInvalidate(ctx, InvalidateOpContent, path)
-		return nil
-	}
-	c.invalidatePrefix(ctx, "/")
-	return nil
+	return cause
 }

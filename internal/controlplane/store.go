@@ -49,6 +49,7 @@ const (
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type WorkspaceMeta struct {
+	extraFields             map[string]json.RawMessage
 	Version                 int       `json:"version"`
 	ID                      string    `json:"id,omitempty"`
 	Name                    string    `json:"name"`
@@ -238,8 +239,36 @@ func (s *Store) WorkspaceExists(ctx context.Context, workspace string) (bool, er
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, workspace string) error {
+	return s.DeleteWorkspaceWithImportLock(ctx, workspace, "")
+}
+
+// DeleteWorkspaceWithImportLock reuses the caller's held lock during a force import.
+func (s *Store) DeleteWorkspaceWithImportLock(ctx context.Context, workspace, token string) error {
 	meta, storageID, err := s.resolveWorkspaceMeta(ctx, workspace)
 	if err != nil {
+		return err
+	}
+	if token == "" {
+		lock, err := AcquireImportLock(ctx, s, storageID)
+		if err != nil {
+			return err
+		}
+		defer lock.Release(context.Background())
+		token = lock.Token()
+	} else {
+		held, err := s.rdb.Get(ctx, ImportLockKey(storageID)).Result()
+		if err != nil {
+			return err
+		}
+		if held != token {
+			return ErrImportInProgress
+		}
+	}
+	generation, err := s.WorkspaceGeneration(ctx, storageID)
+	if err != nil {
+		return err
+	}
+	if err := transitionRootGeneration(ctx, s, storageID, token, generation, "deleted"); err != nil {
 		return err
 	}
 	var cursor uint64
@@ -248,15 +277,39 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspace string) error {
 		if err != nil {
 			return err
 		}
+		retained := keys[:0]
+		for _, key := range keys {
+			if key != WorkspaceGenerationKey(storageID) && key != ImportLockKey(storageID) {
+				retained = append(retained, key)
+			}
+		}
+		keys = retained
 		if len(keys) > 0 {
-			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+			if err := mutateWorkspaceGeneration(ctx, s.rdb, storageID, token, "deleted", func(pipe redis.Pipeliner) error { pipe.Del(ctx, keys...); return nil }); err != nil {
 				return err
 			}
 		}
 		cursor = next
 		if cursor == 0 {
 			if strings.TrimSpace(meta.ID) != "" {
-				if err := s.rdb.HDel(ctx, workspaceNameIndexKey(), meta.Name).Err(); err != nil {
+				if err := s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+					values, err := tx.MGet(ctx, WorkspaceGenerationKey(storageID), ImportLockKey(storageID)).Result()
+					if err != nil {
+						return err
+					}
+					if values[0] != "deleted" || values[1] != token {
+						return ErrWorkspaceConflict
+					}
+					indexed, err := tx.HGet(ctx, workspaceNameIndexKey(), meta.Name).Result()
+					if err != nil && err != redis.Nil {
+						return err
+					}
+					if indexed != storageID {
+						return nil
+					}
+					_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error { pipe.HDel(ctx, workspaceNameIndexKey(), meta.Name); return nil })
+					return err
+				}, WorkspaceGenerationKey(storageID), ImportLockKey(storageID), workspaceNameIndexKey()); err != nil {
 					return err
 				}
 			}
@@ -582,6 +635,15 @@ func (s *Store) MoveWorkspaceHead(ctx context.Context, workspace, savepoint stri
 		if err != nil {
 			return err
 		}
+		if replacement, ok := ctx.Value(rootReplacementKey{}).(rootReplacement); ok {
+			values, err := tx.MGet(ctx, WorkspaceGenerationKey(storageID), ImportLockKey(storageID)).Result()
+			if err != nil {
+				return err
+			}
+			if replacement.id != storageID || values[0] != replacement.generation || values[1] != replacement.token {
+				return ErrWorkspaceConflict
+			}
+		}
 		current.HeadSavepoint = savepoint
 		current.UpdatedAt = updatedAt.UTC()
 		current.DirtyHint = false
@@ -590,7 +652,7 @@ func (s *Store) MoveWorkspaceHead(ctx context.Context, workspace, savepoint stri
 			return setJSON(ctx, pipe, workspaceMetaKey(storageID), current)
 		})
 		return err
-	}, workspaceMetaKey(storageID), workspaceNameIndexKey(), workspaceMetaKey(workspaceStorageID(meta)))
+	}, workspaceMetaKey(storageID), workspaceNameIndexKey(), workspaceMetaKey(workspaceStorageID(meta)), WorkspaceGenerationKey(storageID), ImportLockKey(storageID))
 }
 
 func (s *Store) PutWorkspaceSession(ctx context.Context, record WorkspaceSessionRecord) error {
@@ -968,6 +1030,11 @@ func setJSON(ctx context.Context, cmd redis.Cmdable, key string, value any) erro
 	if err != nil {
 		return err
 	}
+	if _, ok := value.(WorkspaceMeta); ok {
+		if err := cmd.Set(ctx, workspaceMetadataArchiveKey(key), data, 0).Err(); err != nil {
+			return err
+		}
+	}
 	return cmd.Set(ctx, key, data, 0).Err()
 }
 
@@ -987,6 +1054,28 @@ func getJSON[T any](ctx context.Context, cmd redis.Cmdable, key string) (T, erro
 	}
 	if err != nil {
 		return value, err
+	}
+	if _, ok := any(&value).(*WorkspaceMeta); ok {
+		preserved, e := cmd.Get(ctx, workspaceMetadataArchiveKey(key)).Bytes()
+		if e != nil && e != redis.Nil {
+			return value, e
+		}
+		if e == nil {
+			var base, current map[string]json.RawMessage
+			if e = json.Unmarshal(preserved, &base); e != nil {
+				return value, e
+			}
+			if e = json.Unmarshal(data, &current); e != nil {
+				return value, e
+			}
+			for k, v := range current {
+				base[k] = v
+			}
+			data, e = json.Marshal(base)
+			if e != nil {
+				return value, e
+			}
+		}
 	}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return value, err

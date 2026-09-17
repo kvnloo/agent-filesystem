@@ -54,11 +54,8 @@ func (a *LocalAFSAdapter) EnsureSkillsWorkspace(scope, workspaceName string) (Sk
 		Scope: scope,
 		Root:  a.skillsWorkspaceRoot(scope, workspaceName),
 	}
-	if a.usesCLI() {
-		if err := a.Runner.Run("ws", "create", workspace.ID); err != nil && !isAlreadyExistsError(err) {
-			return SkillsWorkspace{}, err
-		}
-	}
+	// This is a local collection directory. Each skill is an independent AFS
+	// workspace; the parent must never become a composed or nested AFS mount.
 	if err := os.MkdirAll(workspace.Root, 0o755); err != nil {
 		return SkillsWorkspace{}, err
 	}
@@ -75,13 +72,6 @@ func (a *LocalAFSAdapter) MountSkillsWorkspace(workspace SkillsWorkspace, mountP
 	mountPoint, err := cleanAbs(mountPoint)
 	if err != nil {
 		return SkillsWorkspace{}, err
-	}
-	if a.usesCLI() {
-		if err := a.Runner.Run("ws", "mount", workspace.ID, mountPoint); err != nil &&
-			!isExistingWorkspaceMount(err, workspace.ID, mountPoint) &&
-			!isEmptySkillsWorkspaceMount(err, workspace.ID) {
-			return SkillsWorkspace{}, err
-		}
 	}
 	workspace.Root = mountPoint
 	if err := os.MkdirAll(workspace.Root, 0o755); err != nil {
@@ -114,7 +104,7 @@ func (a *LocalAFSAdapter) AttachSkillVolume(workspace SkillsWorkspace, volumeID,
 			}
 		}
 		session := "liveskills-ws-" + hashText(workspace.ID + ":" + slug)[:12]
-		if err := a.Runner.Run("vol", "mount", "--yes", "--session", session, volumeID, canonicalPath); err != nil {
+		if err := a.Runner.Run("ws", "mount", "--yes", "--session", session, volumeID, canonicalPath); err != nil {
 			switch {
 			case isExistingAFSMount(err, volumeID, canonicalPath):
 				// Already mounted at the requested canonical path.
@@ -158,7 +148,7 @@ func (a *LocalAFSAdapter) DetachSkillVolumeIfUnused(workspace SkillsWorkspace, v
 		}
 	}
 	if a.usesCLI() {
-		if err := a.Runner.Run("vol", "unmount", canonicalPath); err != nil && !isNotMountedError(err) {
+		if err := a.Runner.Run("ws", "unmount", canonicalPath); err != nil && !isNotMountedError(err) {
 			return err
 		}
 	} else if err := os.RemoveAll(canonicalPath); err != nil {
@@ -238,25 +228,6 @@ func isAlreadyExistsError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "already exists") || strings.Contains(message, "exists")
-}
-
-func isExistingWorkspaceMount(err error, workspaceID, mountPoint string) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "overlaps existing mount") &&
-		strings.Contains(message, strings.ToLower(workspaceID)) &&
-		strings.Contains(message, strings.ToLower(filepath.Clean(mountPoint)))
-}
-
-func isEmptySkillsWorkspaceMount(err error, workspaceID string) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, strings.ToLower(workspaceID)) &&
-		strings.Contains(message, "has no attached volumes")
 }
 
 func isNotMountedError(err error) bool {

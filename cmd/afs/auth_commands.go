@@ -354,7 +354,7 @@ func runCloudLogin(cfg *config, overrideURL, overrideToken, workspace string) er
 		{Label: "workspace", Value: cfg.CurrentWorkspace},
 		{Label: "database", Value: cfg.DatabaseID},
 		{},
-		{Label: "next", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" vol mount "+workspaceHint(cfg.CurrentWorkspace)+" <directory>")},
+		{Label: "next", Value: clr(ansiOrange, filepath.Base(os.Args[0])+" ws mount "+workspaceHint(cfg.CurrentWorkspace)+" <directory>")},
 	})
 	return nil
 }
@@ -397,7 +397,6 @@ func runAccessTokenLogin(cfg *config, mode, overrideURL, accessToken string) err
 	if err != nil {
 		return fmt.Errorf("access token login failed: %w", err)
 	}
-	workspaceCompositions, _ := client.ListWorkspaceCompositions(ctx)
 
 	cfg.ProductMode = mode
 	cfg.URL = normalizedURL
@@ -406,11 +405,7 @@ func runAccessTokenLogin(cfg *config, mode, overrideURL, accessToken string) err
 	cfg.CurrentWorkspace = ""
 	cfg.CurrentWorkspaceID = ""
 	cfg.DatabaseID = ""
-	if len(workspaceCompositions.Items) == 1 {
-		cfg.DatabaseID = strings.TrimSpace(workspaceCompositions.Items[0].DatabaseID)
-		cfg.CurrentWorkspaceID = strings.TrimSpace(workspaceCompositions.Items[0].ID)
-		cfg.CurrentWorkspace = strings.TrimSpace(workspaceCompositions.Items[0].Name)
-	} else if len(workspaces.Items) == 1 {
+	if len(workspaces.Items) == 1 {
 		cfg.DatabaseID = strings.TrimSpace(workspaces.Items[0].DatabaseID)
 		cfg.CurrentWorkspaceID = strings.TrimSpace(workspaces.Items[0].ID)
 		cfg.CurrentWorkspace = strings.TrimSpace(workspaces.Items[0].Name)

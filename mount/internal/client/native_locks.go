@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,9 @@ type storedFileLock struct {
 }
 
 func (c *nativeClient) Getlk(ctx context.Context, inode uint64, handleID string, lk *FileLock) (*FileLock, error) {
+	if err := c.checkGeneration(ctx); err != nil {
+		return nil, err
+	}
 	if err := validateFileLock(lk); err != nil {
 		return nil, err
 	}
@@ -90,9 +94,26 @@ func (c *nativeClient) UnlockAll(ctx context.Context, inode uint64, handleID str
 
 func (c *nativeClient) trySetLock(ctx context.Context, inode uint64, handleID string, lk *FileLock) error {
 	lockKey := c.keys.locks(strconv.FormatUint(inode, 10))
+	if handleID == "" {
+		return errors.New("empty lock owner")
+	}
 
-	return c.retryWatch(ctx, []string{lockKey}, func(tx *redis.Tx) error {
+	return c.retryWatch(ctx, []string{lockKey, c.keys.inode(strconv.FormatUint(inode, 10))}, func(tx *redis.Tx) error {
+		kind, err := tx.HGet(ctx, c.keys.inode(strconv.FormatUint(inode, 10)), "type").Result()
+		if errors.Is(err, redis.Nil) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if kind != "file" {
+			return ErrNotFile
+		}
 		state, err := loadLockStateFromTx(ctx, tx, lockKey)
+		if err != nil {
+			return err
+		}
+		stale, err := c.pruneExpiredLocks(ctx, state)
 		if err != nil {
 			return err
 		}
@@ -113,6 +134,9 @@ func (c *nativeClient) trySetLock(ctx context.Context, inode uint64, handleID st
 
 		nextLocks := applyFileLock(current, *lk)
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if len(stale) > 0 {
+				pipe.HDel(ctx, lockKey, stale...)
+			}
 			if len(nextLocks) == 0 {
 				pipe.HDel(ctx, lockKey, handleID)
 			} else {
@@ -122,6 +146,9 @@ func (c *nativeClient) trySetLock(ctx context.Context, inode uint64, handleID st
 				}
 				pipe.HSet(ctx, lockKey, handleID, encoded)
 			}
+			// Lease expiry determines lock validity. The longer key expiry also
+			// collects abandoned owner records if nobody visits this inode again.
+			pipe.Expire(ctx, lockKey, nativeSessionTTL*2)
 			return nil
 		})
 		return err
@@ -134,7 +161,40 @@ func (c *nativeClient) loadLockState(ctx context.Context, inode uint64) (map[str
 	if err != nil {
 		return nil, err
 	}
-	return decodeLockState(values)
+	state, err := decodeLockState(values)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.pruneExpiredLocks(ctx, state)
+	return state, err
+}
+
+// Owners created by nativeSession contain the unique session lease key. The
+// lease is authority; stale records do not block another mount after a crash.
+func (c *nativeClient) pruneExpiredLocks(ctx context.Context, state map[string][]FileLock) ([]string, error) {
+	var owners, keys []string
+	for owner := range state {
+		lease, _, ok := strings.Cut(owner, "|")
+		if ok && strings.HasPrefix(lease, c.keys.session("")) {
+			owners = append(owners, owner)
+			keys = append(keys, lease)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	values, err := c.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+	var stale []string
+	for i, value := range values {
+		if value == nil {
+			stale = append(stale, owners[i])
+			delete(state, owners[i])
+		}
+	}
+	return stale, nil
 }
 
 func loadLockStateFromTx(ctx context.Context, tx *redis.Tx, lockKey string) (map[string][]FileLock, error) {

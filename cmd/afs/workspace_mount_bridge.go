@@ -61,25 +61,34 @@ func seedWorkspaceMountKey(ctx context.Context, store *afsStore, workspace strin
 }
 
 func saveWorkspaceRootCheckpoint(ctx context.Context, store *afsStore, workspace, expectedHead, savepointID string, options ...controlplane.SaveCheckpointFromLiveOptions) (bool, error) {
-	redisKey, err := store.resolveWorkspaceRedisKey(ctx, workspace)
+	cfg, err := loadAFSConfig()
 	if err != nil {
 		return false, err
 	}
-	rootManifest, blobs, stats, err := buildManifestFromWorkspaceRoot(ctx, store.rdb, redisKey, workspace, savepointID)
+	meta, err := store.getWorkspaceMeta(ctx, workspace)
 	if err != nil {
 		return false, err
 	}
-
-	saved, err := saveAFSManifest(ctx, store, workspace, expectedHead, savepointID, rootManifest, blobs, stats, false, options...)
-	if err != nil {
-		return false, err
+	if meta.HeadSavepoint != expectedHead {
+		return false, errAFSWorkspaceConflict
 	}
-	if !saved {
-		if err := store.markWorkspaceRootClean(ctx, workspace, expectedHead); err != nil {
-			return false, err
-		}
+	var metadata controlplane.SaveCheckpointFromLiveOptions
+	if len(options) > 0 {
+		metadata = options[0]
 	}
-	return saved, nil
+	if metadata.Kind == "" {
+		metadata.Kind = controlplane.CheckpointKindManual
+	}
+	if metadata.Source == "" {
+		metadata.Source = controlplane.CheckpointSourceCLI
+	}
+	// The shared service captures the generation and journal position around its
+	// snapshot and atomically validates both before marking that snapshot clean.
+	saved, err := controlPlaneServiceFromStore(cfg, store).SaveCheckpointFromLiveWithOptions(ctx, workspace, savepointID, metadata)
+	if errors.Is(err, controlplane.ErrWorkspaceConflict) || err == redis.TxFailedErr {
+		return false, errAFSWorkspaceConflict
+	}
+	return saved, err
 }
 
 func buildManifestFromWorkspaceRoot(ctx context.Context, rdb *redis.Client, fsKey, workspace, savepoint string) (manifest, map[string][]byte, manifestStats, error) {

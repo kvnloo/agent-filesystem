@@ -26,13 +26,13 @@ afs = AFS(api_key=os.environ["AFS_API_KEY"])
 workspace = afs.workspace.create(name="foobar")
 
 fs = afs.fs.mount(
-    workspaces=[{"name": workspace["name"]}],
+    workspace=workspace["name"],
     mode="rw",
 )
 
 try:
     fs.write_file("/src/README.md", "hello world")
-    result = fs.bash().exec("cat /foobar/src/README.md")
+    result = fs.bash().exec("cat src/README.md")
     print(result.stdout)
 finally:
     fs.close()
@@ -41,7 +41,7 @@ finally:
 `MountedFS` also works as a context manager:
 
 ```python
-with afs.fs.mount(workspaces=[{"name": "foobar"}], mode="rw") as fs:
+with afs.fs.mount(workspace="foobar", mode="rw") as fs:
     fs.write_file("/README.md", "hello")
 ```
 
@@ -59,11 +59,11 @@ async def main():
     async with AsyncAFS(api_key=os.environ["AFS_API_KEY"]) as afs:
         workspace = await afs.workspace.create(name="foobar")
         async with await afs.fs.mount(
-            workspaces=[{"name": workspace["name"]}],
+            workspace=workspace["name"],
             mode="rw",
         ) as fs:
             await fs.write_file("/src/README.md", "hello world")
-            result = await fs.bash().exec("cat /foobar/src/README.md")
+            result = await fs.bash().exec("cat src/README.md")
             print(result.stdout)
 ```
 
@@ -83,7 +83,7 @@ app = FastAPI()
 @app.get("/readme/{workspace}")
 async def read_readme(workspace: str):
     async with AsyncAFS() as afs:
-        async with await afs.fs.mount(workspaces=[{"name": workspace}], mode="ro") as fs:
+        async with await afs.fs.mount(workspace=workspace, mode="ro") as fs:
             return {"content": await fs.read_file(f"/{workspace}/README.md")}
 ```
 

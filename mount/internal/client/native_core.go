@@ -63,6 +63,7 @@ type nativeClient struct {
 const markRootDirtyThrottle = 100 * time.Millisecond
 
 type inodeData struct {
+	Revision   string
 	ID         string
 	Parent     string
 	Name       string
@@ -199,6 +200,7 @@ func (c *nativeClient) ReadChangeStream(ctx context.Context, lastID string, coun
 	streams, err := c.rdb.XRead(ctx, &redis.XReadArgs{
 		Streams: []string{c.keys.changesStream(), lastID},
 		Count:   count,
+		Block:   -1,
 	}).Result()
 	if err != nil {
 		if err == redis.Nil {
@@ -232,8 +234,9 @@ func (c *nativeClient) ReadChangeStream(ctx context.Context, lastID string, coun
 }
 
 // SubscribeInvalidationsWithReconnect is like SubscribeInvalidations but
-// calls onReconnect each time the underlying pub/sub connection is
-// re-established after a drop.
+// calls onReconnect after the initial subscription and each time the underlying
+// pub/sub connection is re-established. The initial callback closes the gap
+// between a caller's starting snapshot and the confirmed live subscription.
 func (c *nativeClient) SubscribeInvalidationsWithReconnect(ctx context.Context, handler func(InvalidateEvent), onReconnect func()) error {
 	if handler == nil {
 		handler = func(InvalidateEvent) {}
@@ -244,7 +247,6 @@ func (c *nativeClient) SubscribeInvalidationsWithReconnect(ctx context.Context, 
 }
 
 func (c *nativeClient) runInvalidationSubscriberWithReconnect(ctx context.Context, channel string, handler func(InvalidateEvent), onReconnect func()) {
-	firstConnect := true
 	backoff := 100 * time.Millisecond
 	const maxBackoff = 5 * time.Second
 
@@ -271,12 +273,40 @@ func (c *nativeClient) runInvalidationSubscriberWithReconnect(ctx context.Contex
 			continue
 		}
 		backoff = 100 * time.Millisecond
-		if !firstConnect && onReconnect != nil {
+		if onReconnect != nil {
 			onReconnect()
 		}
-		firstConnect = false
-		ch := sub.Channel()
-		c.consumeInvalidationChannel(ctx, ch, handler)
+		// go-redis reconnects inside Channel without closing the channel. Keep
+		// subscription confirmations so those internal reconnects are visible;
+		// the first confirmation was already consumed by Receive above.
+		ch := sub.ChannelWithSubscriptions()
+	consume:
+		for {
+			select {
+			case <-ctx.Done():
+				break consume
+			case message, ok := <-ch:
+				if !ok {
+					break consume
+				}
+				switch msg := message.(type) {
+				case *redis.Subscription:
+					if msg.Kind == "subscribe" && msg.Channel == channel && onReconnect != nil {
+						onReconnect()
+					}
+				case *redis.Message:
+					ev, err := decodeInvalidate([]byte(msg.Payload))
+					if err != nil {
+						log.Printf("afs: invalidate decode failed: %v (payload=%q)", err, msg.Payload)
+						continue
+					}
+					if ev.Origin != c.originID {
+						c.applyRemoteInvalidation(ev)
+						handler(*ev)
+					}
+				}
+			}
+		}
 		_ = sub.Close()
 		if ctx.Err() != nil {
 			return
@@ -409,30 +439,47 @@ func (c *nativeClient) applyRemoteInvalidation(ev *InvalidateEvent) {
 }
 
 func (c *nativeClient) Stat(ctx context.Context, p string) (*StatResult, error) {
-	resolved, inode, err := c.resolvePath(ctx, p, false)
+	_, inode, err := c.resolvePath(ctx, p, false)
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	c.cachePath(resolved, inode)
+	// resolvePath caches Redis reads. Re-caching its result here would renew
+	// hits indefinitely, so a missed invalidation could retain a retired inode
+	// for as long as callers keep polling it.
 	return inode.toStat(), nil
 }
 
 func (c *nativeClient) Cat(ctx context.Context, p string) ([]byte, error) {
-	_, inode, err := c.resolvePath(ctx, p, true)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 4; attempt++ {
+		_, inode, err := c.resolvePath(ctx, p, true)
+		if err != nil {
+			return nil, err
+		}
+		if inode.Type != "file" {
+			return nil, ErrNotFile
+		}
+		content, readErr := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
+		// STRING GET is one atomic read. Array content can span multiple range
+		// reads, so validate its publication identity before returning any bytes.
+		if inode.ContentRef == rediscontent.RefArray {
+			revision, err := c.rdb.HGet(ctx, c.keys.inode(inode.ID), "revision").Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, err
+			}
+			if revision != inode.Revision {
+				c.InvalidateCache()
+				continue
+			}
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		return []byte(content), nil
 	}
-	if inode.Type != "file" {
-		return nil, ErrNotFile
-	}
-	content, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
-	if err != nil {
-		return nil, err
-	}
-	return []byte(content), nil
+	return nil, ErrWriteConflict
 }
 
 func (c *nativeClient) Echo(ctx context.Context, p string, data []byte) error {
@@ -507,6 +554,10 @@ func (c *nativeClient) CreateFile(ctx context.Context, p string, mode uint32, ex
 }
 
 func (c *nativeClient) Mkdir(ctx context.Context, p string) error {
+	return c.MkdirMode(ctx, p, 0o755)
+}
+
+func (c *nativeClient) MkdirMode(ctx context.Context, p string, mode uint32) error {
 	p = normalizePath(p)
 	if p == "/" {
 		return c.ensureRoot(ctx)
@@ -524,7 +575,7 @@ func (c *nativeClient) Mkdir(ctx context.Context, p string) error {
 		}
 		return ErrAlreadyExists
 	}
-	if err := c.createDir(ctx, p, 0o755); err != nil {
+	if err := c.createDir(ctx, p, mode); err != nil {
 		return err
 	}
 	return c.markRootDirty(ctx)
@@ -543,69 +594,11 @@ func (c *nativeClient) Rm(ctx context.Context, p string) error {
 	if snapErr != nil {
 		return snapErr
 	}
-	if inode.Type == "dir" {
-		children, err := c.loadDirEntries(ctx, inode.ID)
-		if err != nil {
-			return err
-		}
-		if len(children) > 0 {
-			ids := make([]string, 0, len(children))
-			for _, id := range children {
-				ids = append(ids, id)
-			}
-			childrenByID, err := c.loadInodesByID(ctx, ids)
-			if err != nil {
-				return err
-			}
-			staleNames := make([]string, 0)
-			liveChildren := 0
-			for name, id := range children {
-				if childrenByID[id] == nil {
-					staleNames = append(staleNames, name)
-					continue
-				}
-				liveChildren++
-			}
-			if len(staleNames) > 0 {
-				if err := c.rdb.HDel(ctx, c.keys.dirents(inode.ID), staleNames...).Err(); err != nil {
-					return err
-				}
-				c.invalidateInode(ctx, resolved)
-			}
-			if liveChildren > 0 {
-				return ErrDirNotEmpty
-			}
-		}
-	}
-
-	c.invalidateInode(ctx, resolved)
-	pipe := c.rdb.Pipeline()
-	pipe.Del(ctx, c.keys.inode(inode.ID))
-	if inode.Type == "file" {
-		pipe.Del(ctx, c.keys.content(inode.ID))
-		c.queueQueryDeleted(ctx, pipe, inode.ID)
-	}
-	if inode.Type == "dir" {
-		pipe.Del(ctx, c.keys.dirents(inode.ID))
-	}
-	parentPath := parentOf(resolved)
-	if inode.Parent != "" {
-		pipe.HDel(ctx, c.keys.dirents(inode.Parent), inode.Name)
-		c.queueTouchTimes(pipe, inode.Parent, nowMs())
-	}
-	c.queueDeleteInfo(pipe, inode)
-	_, err = pipe.Exec(ctx)
-	c.invalidateInode(ctx, parentPath)
-	// Re-invalidate the removed path AFTER the pipeline so peer sync daemons
-	// that raced on the pre-deletion invalidation (line 553) see a second
-	// event and discover the file is now gone.
-	c.invalidateInode(ctx, resolved)
-	if err != nil {
+	if err := c.deletePublishedInode(ctx, resolved, inode); err != nil {
 		return err
 	}
-	if err := c.markRootDirty(ctx); err != nil {
-		return err
-	}
+	c.invalidateInode(ctx, parentOf(resolved))
+	c.invalidateInode(ctx, resolved)
 	if inode.Type == "file" || inode.Type == "symlink" {
 		if err := c.recordVersionMutation(ctx, beforeSnapshot, VersionedSnapshot{Path: resolved}); err != nil {
 			return err
@@ -843,16 +836,12 @@ func (c *nativeClient) Truncate(ctx context.Context, p string, size int64) error
 		content = newBuf
 	}
 
-	delta := int64(len(content)) - inode.Size
 	inode.Content = string(content)
 	inode.Size = int64(len(content))
 	now := nowMs()
 	inode.MtimeMs = now
 	inode.AtimeMs = now
 	if err := c.saveInode(ctx, resolved, inode); err != nil {
-		return err
-	}
-	if err := c.adjustTotalData(ctx, delta); err != nil {
 		return err
 	}
 	c.publishInvalidate(ctx, InvalidateOpContent, resolved)
@@ -935,7 +924,7 @@ func (c *nativeClient) SetAttrs(ctx context.Context, p string, upd AttrUpdate) e
 		fields["mtime_ms"] = inode.MtimeMs
 	}
 
-	if err := c.rdb.HSet(ctx, c.keys.inode(inode.ID), fields).Err(); err != nil {
+	if err := c.updatePublishedInode(ctx, resolved, inode, fields); err != nil {
 		return err
 	}
 	c.cachePath(resolved, inode)
@@ -1044,7 +1033,6 @@ func (c *nativeClient) writeFile(ctx context.Context, p string, data []byte, app
 		return snapErr
 	}
 
-	before := inode.Size
 	if appendMode {
 		existing, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
 		if err != nil {
@@ -1059,9 +1047,6 @@ func (c *nativeClient) writeFile(ctx context.Context, p string, data []byte, app
 	inode.MtimeMs = now
 	inode.AtimeMs = now
 	if err := c.saveInode(ctx, resolved, inode); err != nil {
-		return err
-	}
-	if err := c.adjustTotalData(ctx, inode.Size-before); err != nil {
 		return err
 	}
 	c.publishInvalidate(ctx, InvalidateOpContent, resolved)
@@ -1082,6 +1067,15 @@ func (c *nativeClient) createFile(ctx context.Context, p string, content string,
 	inode, created, err := c.createFileIfMissing(ctx, p, content, mode, false)
 	if err != nil {
 		return err
+	}
+	if !created && content != "" {
+		published, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
+		if err != nil {
+			return err
+		}
+		if published != content {
+			return ErrWriteConflict
+		}
 	}
 	if err := c.markRootDirty(ctx); err != nil {
 		return err
@@ -1121,15 +1115,16 @@ func (c *nativeClient) createDirNoParents(ctx context.Context, p string, mode ui
 
 func (i *inodeData) toStat() *StatResult {
 	return &StatResult{
-		Inode: inodeUint64(i.ID),
-		Type:  i.Type,
-		Mode:  i.Mode,
-		UID:   i.UID,
-		GID:   i.GID,
-		Size:  i.Size,
-		Ctime: i.CtimeMs,
-		Mtime: i.MtimeMs,
-		Atime: i.AtimeMs,
+		Inode:    inodeUint64(i.ID),
+		Revision: i.Revision,
+		Type:     i.Type,
+		Mode:     i.Mode,
+		UID:      i.UID,
+		GID:      i.GID,
+		Size:     i.Size,
+		Ctime:    i.CtimeMs,
+		Mtime:    i.MtimeMs,
+		Atime:    i.AtimeMs,
 	}
 }
 
@@ -1146,181 +1141,7 @@ func sortNames(values map[string]string) []string {
 // pipelined SETRANGE, then atomically updates inode metadata (size, mtime,
 // chunk_size, chunk_hashes). chunks maps chunk-index → data.
 func (c *nativeClient) WriteChunks(ctx context.Context, p string, chunks map[int][]byte, chunkSize int, newSize int64, hashes []string) error {
-	resolved, inode, err := c.resolvePath(ctx, p, true)
-	if err != nil {
-		return err
-	}
-	if inode.Type != "file" {
-		return ErrNotFile
-	}
-	beforeSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)
-	if snapErr != nil {
-		return snapErr
-	}
-
-	preferredRef, err := c.preferredContentRef(ctx)
-	if err != nil {
-		return err
-	}
-	if preferredRef == rediscontent.RefArray {
-		if inode.ContentRef != rediscontent.RefArray {
-			content, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
-			if err != nil {
-				return err
-			}
-			pipe := c.rdb.Pipeline()
-			rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(inode.ID), rediscontent.RefArray, []byte(content))
-			if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-				return err
-			}
-		}
-		dirty := make([]int, 0, len(chunks))
-		for idx := range chunks {
-			dirty = append(dirty, idx)
-		}
-		sort.Ints(dirty)
-		for _, idx := range dirty {
-			offset := int64(idx) * int64(chunkSize)
-			if err := rediscontent.WriteRange(ctx, c.rdb, c.keys.content(inode.ID), offset, chunks[idx]); err != nil {
-				return err
-			}
-		}
-		if newSize < inode.Size {
-			if err := rediscontent.Truncate(ctx, c.rdb, c.keys.content(inode.ID), inode.Size, newSize); err != nil {
-				return err
-			}
-		}
-		now := nowMs()
-		hashJSON, _ := encodeChunkHashes(hashes)
-		delta := newSize - inode.Size
-		searchFields := map[string]interface{}{
-			"search_state":  fileSearchStateLarge,
-			"grep_grams_ci": "",
-		}
-		if newSize <= fileSearchMaxIndexedBytes {
-			content, err := rediscontent.Load(ctx, c.rdb, c.keys.content(inode.ID), rediscontent.RefArray, newSize)
-			if err != nil {
-				return err
-			}
-			searchFields = fileSearchIndexFields(string(content))
-		}
-		metaPipe := c.rdb.Pipeline()
-		metaPipe.HSet(ctx, c.keys.inode(inode.ID),
-			"size", newSize,
-			"mtime_ms", now,
-			"atime_ms", now,
-			"content_ref", rediscontent.RefArray,
-			"chunk_size", chunkSize,
-			"chunk_hashes", hashJSON,
-		)
-		metaPipe.HSet(ctx, c.keys.inode(inode.ID), searchFields)
-		c.queueQueryDirty(ctx, metaPipe, inode.ID)
-		if delta != 0 {
-			metaPipe.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta)
-		}
-		metaPipe.Set(ctx, c.keys.rootDirty(), "1", 0)
-		if _, err := metaPipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-
-		c.invalidateInode(ctx, resolved)
-		inode.Size = newSize
-		inode.MtimeMs = now
-		inode.AtimeMs = now
-		inode.ContentRef = rediscontent.RefArray
-		afterSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)
-		if snapErr != nil {
-			return snapErr
-		}
-		if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if inode.ContentRef != rediscontent.RefExternal {
-		// Migrate to external string content first.
-		content, err := c.loadContentExternal(ctx, inode.ID, inode.ContentRef)
-		if err != nil {
-			return err
-		}
-		if err := c.rdb.Set(ctx, c.keys.content(inode.ID), content, 0).Err(); err != nil {
-			return err
-		}
-	}
-
-	// Write dirty chunks via pipelined SETRANGE.
-	pipe := c.rdb.Pipeline()
-	for idx, data := range chunks {
-		offset := int64(idx) * int64(chunkSize)
-		pipe.SetRange(ctx, c.keys.content(inode.ID), offset, string(data))
-	}
-
-	// Handle truncation if file shrunk.
-	if newSize < inode.Size {
-		// Redis SETRANGE can't truncate. Read the kept portion and SET.
-		// This is only needed when the file actually shrunk.
-		getCmd := pipe.GetRange(ctx, c.keys.content(inode.ID), 0, newSize-1)
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-		truncated := getCmd.Val()
-		if err := c.rdb.Set(ctx, c.keys.content(inode.ID), truncated, 0).Err(); err != nil {
-			return err
-		}
-	} else {
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-	}
-
-	// Update inode metadata atomically.
-	now := nowMs()
-	hashJSON, _ := encodeChunkHashes(hashes)
-	delta := newSize - inode.Size
-	searchFields := map[string]interface{}{
-		"search_state":  fileSearchStateLarge,
-		"grep_grams_ci": "",
-	}
-	if newSize <= fileSearchMaxIndexedBytes {
-		content, err := c.rdb.Get(ctx, c.keys.content(inode.ID)).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-		searchFields = fileSearchIndexFields(content)
-	}
-	metaPipe := c.rdb.Pipeline()
-	metaPipe.HSet(ctx, c.keys.inode(inode.ID),
-		"size", newSize,
-		"mtime_ms", now,
-		"atime_ms", now,
-		"content_ref", rediscontent.RefExternal,
-		"chunk_size", chunkSize,
-		"chunk_hashes", hashJSON,
-	)
-	metaPipe.HSet(ctx, c.keys.inode(inode.ID), searchFields)
-	c.queueQueryDirty(ctx, metaPipe, inode.ID)
-	if delta != 0 {
-		metaPipe.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta)
-	}
-	metaPipe.Set(ctx, c.keys.rootDirty(), "1", 0)
-	if _, err := metaPipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-
-	c.invalidateInode(ctx, resolved)
-	inode.Size = newSize
-	inode.MtimeMs = now
-	inode.AtimeMs = now
-	inode.ContentRef = rediscontent.RefExternal
-	afterSnapshot, snapErr := c.versionedSnapshotFromResolved(ctx, resolved, inode)
-	if snapErr != nil {
-		return snapErr
-	}
-	if err := c.recordVersionMutation(ctx, beforeSnapshot, afterSnapshot); err != nil {
-		return err
-	}
-	return nil
+	return c.publishChunks(ctx, p, chunks, chunkSize, newSize, hashes)
 }
 
 // ReadChunks reads specific chunks from a file's content key via pipelined

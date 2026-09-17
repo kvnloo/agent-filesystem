@@ -207,13 +207,13 @@ function eventTitle(event: AFSEventEntry): string {
     case "checkpoint.restore":
       return "Checkpoint restored";
     case "workspace.create":
-      return "Volume created";
+      return "Workspace created";
     case "workspace.import":
-      return "Volume imported";
+      return "Workspace imported";
     case "workspace.fork":
-      return "Volume forked";
+      return "Workspace forked";
     case "workspace.update":
-      return "Volume updated";
+      return "Workspace updated";
     case "session.start":
       return "Session started";
     case "session.close":

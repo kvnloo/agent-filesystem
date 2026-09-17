@@ -59,6 +59,7 @@ type Client interface {
 	Setlk(ctx context.Context, inode uint64, handleID string, lk *FileLock, wait bool) error
 	UnlockAll(ctx context.Context, inode uint64, handleID string) error
 	Mkdir(ctx context.Context, path string) error
+	MkdirMode(ctx context.Context, path string, mode uint32) error
 	Rm(ctx context.Context, path string) error
 	Ls(ctx context.Context, path string) ([]string, error)
 	LsLong(ctx context.Context, path string) ([]LsEntry, error)
@@ -158,20 +159,41 @@ type PathCacheWarmer interface {
 // the connected Redis server supports (`ext` strings everywhere, or `array`
 // content keys when Redis Array is available).
 func New(rdb *redis.Client, key string) Client {
-	return newNativeClient(rdb, key, nil)
+	return guardClient(newNativeClient(rdb, key, nil), rdb, key)
 }
 
 // NewWithCache creates a filesystem client with an inode cache.
 // Repeated path lookups within the TTL window skip Redis round-trips.
 // All write operations automatically invalidate affected cache entries.
 func NewWithCache(rdb *redis.Client, key string, ttl time.Duration) Client {
-	return newNativeClientWithCache(rdb, key, ttl, nil)
+	return guardClient(newNativeClientWithCache(rdb, key, ttl, nil), rdb, key)
 }
 
 func NewWithObserver(rdb *redis.Client, key string, observer MutationObserver) Client {
-	return newNativeClient(rdb, key, observer)
+	return guardClient(newNativeClient(rdb, key, observer), rdb, key)
 }
 
 func NewWithCacheAndObserver(rdb *redis.Client, key string, ttl time.Duration, observer MutationObserver) Client {
-	return newNativeClientWithCache(rdb, key, ttl, observer)
+	return guardClient(newNativeClientWithCache(rdb, key, ttl, observer), rdb, key)
+}
+
+type NativeClient interface {
+	Client
+	StatInode(context.Context, uint64) (*StatResult, error)
+	InodePath(context.Context, uint64) (string, error)
+	ReadInodeAt(context.Context, uint64, int64, int) ([]byte, error)
+	WriteInodeAt(context.Context, uint64, []byte, int64) error
+	// An offset of -1 appends atomically to the latest committed inode size.
+	WriteInodeAtPath(context.Context, uint64, string, []byte, int64) error
+	TruncateInode(context.Context, uint64, int64) error
+	TruncateInodeAtPath(context.Context, uint64, string, int64) error
+	Getlk(context.Context, uint64, string, *FileLock) (*FileLock, error)
+	Setlk(context.Context, uint64, string, *FileLock, bool) error
+	UnlockAll(context.Context, uint64, string) error
+	// Check fences adapter-local cache hits that do not need a data request.
+	Check(context.Context) error
+	// Barrier waits for requests already admitted by this client and checks
+	// its generation and Redis connection. The caller first drains kernel I/O.
+	Barrier(context.Context) error
+	Close() error
 }

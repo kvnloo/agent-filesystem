@@ -219,8 +219,8 @@ func TestPrepareSyncBootstrapLocalCreatesTrackedSession(t *testing.T) {
 	}
 	saveTempConfig(t, cfg)
 
-	if err := cmdVolume([]string{"vol", "create", "repo"}); err != nil {
-		t.Fatalf("cmdVolume(create) returned error: %v", err)
+	if err := cmdWorkspace([]string{"ws", "create", "repo"}); err != nil {
+		t.Fatalf("cmdWorkspace(create) returned error: %v", err)
 	}
 
 	bootstrap, closeFn, err := prepareSyncBootstrap(context.Background(), cfg)

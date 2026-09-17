@@ -142,10 +142,6 @@ func (s *afsStore) markWorkspaceRootDirty(ctx context.Context, workspace string)
 	return controlplane.MarkWorkspaceRootDirty(ctx, s.cp, workspace)
 }
 
-func (s *afsStore) markWorkspaceRootClean(ctx context.Context, workspace, headSavepoint string) error {
-	return controlplane.MarkWorkspaceRootClean(ctx, s.cp, workspace, headSavepoint)
-}
-
 func workspaceRedisKey(workspace string) string {
 	return controlplane.WorkspaceFSKey(workspace)
 }

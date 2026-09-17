@@ -29,10 +29,10 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 	closeStore()
 
 	setIncludeOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "config", "repo", "set", "versioning.includeGlobs", "src/**,docs/**", "--json"})
+		return cmdWorkspace([]string{"ws", "config", "repo", "set", "versioning.includeGlobs", "src/**,docs/**", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(config set includeGlobs) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(config set includeGlobs) returned error: %v", err)
 	}
 	var includePayload workspaceConfigJSON
 	if err := json.Unmarshal([]byte(setIncludeOutput), &includePayload); err != nil {
@@ -43,10 +43,10 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 	}
 
 	setModeOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "config", "repo", "set", "versioning.mode", "paths", "--json"})
+		return cmdWorkspace([]string{"ws", "config", "repo", "set", "versioning.mode", "paths", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(config set mode) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(config set mode) returned error: %v", err)
 	}
 	var modePayload workspaceConfigJSON
 	if err := json.Unmarshal([]byte(setModeOutput), &modePayload); err != nil {
@@ -57,10 +57,10 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 	}
 
 	getOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "config", "repo", "get", "versioning.mode", "--json"})
+		return cmdWorkspace([]string{"ws", "config", "repo", "get", "versioning.mode", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(config get mode) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(config get mode) returned error: %v", err)
 	}
 	var getPayload workspaceConfigJSON
 	if err := json.Unmarshal([]byte(getOutput), &getPayload); err != nil {
@@ -71,10 +71,10 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 	}
 
 	listOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "config", "repo", "list", "--json"})
+		return cmdWorkspace([]string{"ws", "config", "repo", "list", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(config list) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(config list) returned error: %v", err)
 	}
 	var listPayload workspaceConfigListJSON
 	if err := json.Unmarshal([]byte(listOutput), &listPayload); err != nil {
@@ -88,10 +88,10 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 	}
 
 	unsetOutput, err := captureStdout(t, func() error {
-		return cmdVolume([]string{"vol", "config", "repo", "unset", "versioning.mode", "--json"})
+		return cmdWorkspace([]string{"ws", "config", "repo", "unset", "versioning.mode", "--json"})
 	})
 	if err != nil {
-		t.Fatalf("cmdVolume(config unset mode) returned error: %v", err)
+		t.Fatalf("cmdWorkspace(config unset mode) returned error: %v", err)
 	}
 	var unsetPayload workspaceConfigJSON
 	if err := json.Unmarshal([]byte(unsetOutput), &unsetPayload); err != nil {
@@ -101,8 +101,8 @@ func TestWorkspaceConfigVersioningRoundTrip(t *testing.T) {
 		t.Fatalf("unset payload value = %#v, want %q", unsetPayload.Value, controlplane.WorkspaceVersioningModeOff)
 	}
 
-	if err := cmdVolume([]string{"vol", "config", "repo", "set", "query.embeddings.model", "embeddinggemma"}); err == nil {
-		t.Fatal("cmdVolume(config set query.embeddings.model) returned nil, want global model guidance")
+	if err := cmdWorkspace([]string{"ws", "config", "repo", "set", "query.embeddings.model", "embeddinggemma"}); err == nil {
+		t.Fatal("cmdWorkspace(config set query.embeddings.model) returned nil, want global model guidance")
 	}
 }
 

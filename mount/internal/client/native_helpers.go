@@ -1,9 +1,7 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -12,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/agent-filesystem/internal/queryindex"
 	"github.com/redis/agent-filesystem/internal/rediscontent"
 	"github.com/redis/go-redis/v9"
 )
@@ -25,14 +22,14 @@ const (
 var inodeMetaFields = []string{
 	"type", "mode", "uid", "gid", "size",
 	"ctime_ms", "mtime_ms", "atime_ms", "target",
-	"parent", "name", "content_ref",
+	"parent", "name", "content_ref", "revision",
 }
 
 var inodeWarmFields = []string{
 	"path",
 	"type", "mode", "uid", "gid", "size",
 	"ctime_ms", "mtime_ms", "atime_ms", "target",
-	"parent", "name", "content_ref",
+	"parent", "name", "content_ref", "revision",
 }
 
 type namedInode struct {
@@ -47,21 +44,6 @@ type warmedPathEntry struct {
 }
 
 var errNeedDirWatch = errors.New("need destination dir watch")
-
-const (
-	fileSearchGramSize        = 3
-	fileSearchMaxIndexedBytes = 256 << 10
-	fileSearchMaxUniqueGrams  = 16384
-
-	fileSearchStateReady  = "ready"
-	fileSearchStateBinary = "binary"
-	fileSearchStateLarge  = "large"
-)
-
-type fileSearchFields struct {
-	SearchState string
-	GrepGramsCI string
-}
 
 func (c *nativeClient) loadRootInode(ctx context.Context) (*inodeData, error) {
 	if c.cache != nil {
@@ -81,12 +63,18 @@ func (c *nativeClient) loadRootInode(ctx context.Context) (*inodeData, error) {
 }
 
 func (c *nativeClient) ensureRoot(ctx context.Context) error {
+	if err := c.checkGeneration(ctx); err != nil {
+		return err
+	}
 	root, err := c.loadRootInode(ctx)
 	if err != nil {
 		return err
 	}
 	if root != nil {
 		return nil
+	}
+	if _, managed := ctx.Value(workspaceGenerationKey{}).(string); managed {
+		return ErrWorkspaceChanged
 	}
 
 	now := nowMs()
@@ -121,6 +109,18 @@ func (c *nativeClient) ensureRoot(ctx context.Context) error {
 }
 
 func (c *nativeClient) ensureParents(ctx context.Context, p string) error {
+	if parents, _ := ctx.Value(expectedParentsKey{}).(expectedParents); len(parents) > 0 {
+		// Native handles refer to existing directories. A stale pathname must
+		// never cause implicit parent creation before the identity check.
+		_, parent, err := c.resolvePath(ctx, parentOf(normalizePath(p)), true)
+		if errors.Is(err, redis.Nil) {
+			return ErrWriteConflict
+		}
+		if err != nil {
+			return err
+		}
+		return checkExpectedParent(ctx, p, parent.ID)
+	}
 	if err := c.ensureRoot(ctx); err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (c *nativeClient) ensureParents(ctx context.Context, p string) error {
 }
 
 func (c *nativeClient) resolvePath(ctx context.Context, p string, followFinal bool) (string, *inodeData, error) {
-	if err := c.ensureRoot(ctx); err != nil {
+	if err := c.checkGeneration(ctx); err != nil {
 		return "", nil, err
 	}
 
@@ -503,45 +503,9 @@ func (c *nativeClient) loadContentExternal(ctx context.Context, id, contentRef s
 	if err != nil && err != redis.Nil {
 		return "", err
 	}
-	preferredRef, err := c.preferredContentRef(ctx)
-	if err != nil {
-		return "", err
-	}
-	// Lazy migration: move inline content to the preferred external backend.
-	// This is best-effort — if it fails, the next read will retry.
-	if v != "" || preferredRef != "" {
-		pipe := c.rdb.Pipeline()
-		rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(id), preferredRef, []byte(v))
-		pipe.HSet(ctx, c.keys.inode(id), mergeFieldMaps(map[string]interface{}{
-			"content_ref": preferredRef,
-		}, fileSearchIndexFields(v)))
-		pipe.HDel(ctx, c.keys.inode(id), "content")
-		_, _ = pipe.Exec(ctx)
-	}
+	// A read must not migrate live content outside the publication guard.
+	// The next staged write converts the representation atomically.
 	return v, nil
-}
-
-func buildFileSearchFields(content string) fileSearchFields {
-	data := []byte(content)
-	switch {
-	case fileSearchIsBinaryPrefix(data):
-		return fileSearchFields{SearchState: fileSearchStateBinary}
-	case len(data) > fileSearchMaxIndexedBytes:
-		return fileSearchFields{SearchState: fileSearchStateLarge}
-	default:
-		return fileSearchFields{
-			SearchState: fileSearchStateReady,
-			GrepGramsCI: strings.Join(fileSearchGramTerms(bytes.ToLower(data)), " "),
-		}
-	}
-}
-
-func fileSearchIndexFields(content string) map[string]interface{} {
-	fields := buildFileSearchFields(content)
-	return map[string]interface{}{
-		"search_state":  fields.SearchState,
-		"grep_grams_ci": fields.GrepGramsCI,
-	}
 }
 
 func mergeFieldMaps(base map[string]interface{}, extras ...map[string]interface{}) map[string]interface{} {
@@ -553,33 +517,6 @@ func mergeFieldMaps(base map[string]interface{}, extras ...map[string]interface{
 	return base
 }
 
-func fileSearchIsBinaryPrefix(data []byte) bool {
-	checkLen := len(data)
-	if checkLen > 8192 {
-		checkLen = 8192
-	}
-	return bytes.IndexByte(data[:checkLen], '\x00') >= 0
-}
-
-func fileSearchGramTerms(data []byte) []string {
-	if len(data) < fileSearchGramSize {
-		return nil
-	}
-
-	seen := make(map[string]struct{}, 256)
-	terms := make([]string, 0, 256)
-	for i := 0; i+fileSearchGramSize <= len(data) && len(terms) < fileSearchMaxUniqueGrams; i++ {
-		term := "g" + hex.EncodeToString(data[i:i+fileSearchGramSize])
-		if _, ok := seen[term]; ok {
-			continue
-		}
-		seen[term] = struct{}{}
-		terms = append(terms, term)
-	}
-	sort.Strings(terms)
-	return terms
-}
-
 func (c *nativeClient) saveInode(ctx context.Context, p string, inode *inodeData) error {
 	if inode == nil || inode.ID == "" {
 		return errors.New("missing inode id")
@@ -587,25 +524,19 @@ func (c *nativeClient) saveInode(ctx context.Context, p string, inode *inodeData
 	if err := c.selectContentRef(ctx, inode); err != nil {
 		return err
 	}
-	if inode.Type == "file" && isExternalContentRef(inode.ContentRef) {
-		// Write content to the external backend and metadata to HASH in the
-		// same pipeline.
-		pipe := c.rdb.Pipeline()
-		rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(inode.ID), inode.ContentRef, []byte(inode.Content))
-		pipe.HSet(ctx, c.keys.inode(inode.ID), mergeFieldMaps(c.inodeFieldsAtPath(inode, p, false), fileSearchIndexFields(inode.Content)))
-		if inode.Content != "" {
-			c.queueQueryDirty(ctx, pipe, inode.ID)
-		}
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-	} else {
-		if err := c.saveInodeAtPath(ctx, p, inode, true); err != nil {
-			return err
-		}
+	if inode.Type != "file" {
+		return c.saveInodeAtPath(ctx, p, inode, true)
 	}
-	c.cachePath(p, inode)
-	return nil
+	if err := checkWriteCondition(ctx, inode, false); err != nil {
+		return err
+	}
+	stage, err := c.stageFullFile(ctx, inode)
+	if err != nil {
+		return err
+	}
+	defer c.discardStage(stage)
+	fields := fileSearchIndexFields(inode.Content)
+	return c.publishStagedFile(ctx, p, inode, stage, false, fields)
 }
 
 func (c *nativeClient) saveInodeMeta(ctx context.Context, p string, inode *inodeData) error {
@@ -623,14 +554,7 @@ func (c *nativeClient) saveInodeAtPath(ctx context.Context, p string, inode *ino
 	if inode == nil || inode.ID == "" {
 		return errors.New("missing inode id")
 	}
-	return c.rdb.HSet(ctx, c.keys.inode(inode.ID), c.inodeFieldsAtPath(inode, p, includeContent)).Err()
-}
-
-func (c *nativeClient) saveInodeDirect(ctx context.Context, inode *inodeData, includeContent bool) error {
-	if inode == nil || inode.ID == "" {
-		return errors.New("missing inode id")
-	}
-	return c.rdb.HSet(ctx, c.keys.inode(inode.ID), c.inodeFields(inode, includeContent)).Err()
+	return c.updatePublishedInode(ctx, p, inode, c.inodeFieldsAtPath(inode, p, includeContent))
 }
 
 func (c *nativeClient) createInodeAtPath(ctx context.Context, p string, inode *inodeData, ensureParents bool) error {
@@ -656,6 +580,9 @@ func (c *nativeClient) createInodeUnderParent(ctx context.Context, childPath str
 	if parent == nil || parent.Type != "dir" {
 		return ErrParentConflict
 	}
+	if err := checkExpectedParent(ctx, childPath, parent.ID); err != nil {
+		return err
+	}
 	if _, err := c.lookupChildID(ctx, parent.ID, name); err == nil {
 		return ErrAlreadyExists
 	} else if !errors.Is(err, redis.Nil) {
@@ -679,24 +606,39 @@ func (c *nativeClient) createInodeUnderParent(ctx context.Context, childPath str
 		}
 	}
 
-	pipe := c.rdb.Pipeline()
-	if inode.Type == "file" && isExternalContentRef(inode.ContentRef) {
-		// Content goes to the external backend; metadata-only to the HASH.
-		rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(id), inode.ContentRef, []byte(inode.Content))
-		pipe.HSet(ctx, c.keys.inode(id), mergeFieldMaps(c.inodeFieldsAtPath(inode, childPath, false), fileSearchIndexFields(inode.Content)))
-		if inode.Content != "" {
-			c.queueQueryDirty(ctx, pipe, id)
+	err = c.retryWatch(ctx, []string{c.keys.dirents(parent.ID), c.keys.inode(parent.ID)}, func(tx *redis.Tx) error {
+		exists, err := tx.Exists(ctx, c.keys.inode(parent.ID)).Result()
+		if err != nil {
+			return err
 		}
-	} else {
-		pipe.HSet(ctx, c.keys.inode(id), c.inodeFieldsAtPath(inode, childPath, inode.Type == "file"))
-		if inode.Type == "file" && inode.Content != "" {
-			c.queueQueryDirty(ctx, pipe, id)
+		if exists == 0 {
+			return ErrWriteConflict
 		}
-	}
-	pipe.HSet(ctx, c.keys.dirents(parent.ID), name, id)
-	c.queueTouchTimes(pipe, parent.ID, now)
-	c.queueCreateInfo(pipe, inode)
-	if _, err := pipe.Exec(ctx); err != nil {
+		existsName, err := tx.HExists(ctx, c.keys.dirents(parent.ID), name).Result()
+		if err != nil {
+			return err
+		}
+		if existsName {
+			return ErrAlreadyExists
+		}
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if inode.Type == "file" && isExternalContentRef(inode.ContentRef) {
+				// Content goes to the external backend; metadata-only to the HASH.
+				rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(id), inode.ContentRef, []byte(inode.Content))
+				pipe.HSet(ctx, c.keys.inode(id), c.inodeFieldsAtPath(inode, childPath, false))
+			} else {
+				pipe.HSet(ctx, c.keys.inode(id), c.inodeFieldsAtPath(inode, childPath, inode.Type == "file"))
+			}
+			pipe.HSet(ctx, c.keys.dirents(parent.ID), name, id)
+			c.queueTouchTimes(pipe, parent.ID, now)
+			c.queueCreateInfo(pipe, inode)
+			pipe.Set(ctx, c.keys.rootDirty(), "1", 0)
+			c.queueInvalidation(ctx, pipe, InvalidateOpInode, childPath)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
 		return err
 	}
 
@@ -716,134 +658,65 @@ func (c *nativeClient) createInodeUnderParent(ctx context.Context, childPath str
 	return nil
 }
 
-// createFileIfMissing is the hot-path file create used by CreateFile and the
-// NFS CREATE RPC. It collapses the old WATCH/MULTI four-round-trip sequence
-// into two round trips on the common (uncontended) path by using HSETNX as
-// the atomic name-claim primitive:
-//
-//  1. INCR nextInode                                   (RTT #1)
-//  2. Pipeline:                                        (RTT #2)
-//     - HSETNX dirents:{parent} name id
-//     - HSET   inode:{id} <fields>
-//     - HSET   inode:{parent} ctime_ms/mtime_ms (queueTouchTimes)
-//     - HIncrBy info files/total_data_bytes (queueCreateInfo)
-//
-// On the rare lost-race path the HSETNX returns 0. We then:
-//
-//  3. Cleanup pipeline (RTT #3, rare):
-//     - DEL inode:{id}                            (orphan we just wrote)
-//     - HIncrBy info files -1                     (reverse the optimistic bump)
-//     - HIncrBy info total_data_bytes -len(content) if content was non-empty
-//
-// and fall through to load the existing file via loadInodeByID (one additional
-// read on the existing-file branch, same as today's WATCH/MULTI loser path).
-//
-// See docs/performance.md for the summarized benchmark rationale.
+// createFileIfMissing retains the atomic name claim and inode representation.
+// Content is staged before the name claim so interrupted creation cannot leave
+// a visible empty file or dangling directory entry.
 func (c *nativeClient) createFileIfMissing(ctx context.Context, p string, content string, mode uint32, exclusive bool) (*inodeData, bool, error) {
 	p = normalizePath(p)
 	if p == "/" {
 		return nil, false, ErrCannotWriteRoot
 	}
 	parentPath := parentOf(p)
-	_, parentInode, err := c.resolvePath(ctx, parentPath, true)
+	_, parent, err := c.resolvePath(ctx, parentPath, true)
 	if err != nil {
 		return nil, false, err
 	}
-	if parentInode.Type != "dir" {
+	if parent.Type != "dir" {
 		return nil, false, ErrParentConflict
 	}
-
-	direntsKey := c.keys.dirents(parentInode.ID)
-	name := baseName(p)
-
-	// Allocate the inode ID up front. This is one RTT but it must precede
-	// the pipeline because the ID is used as the value of the HSETNX claim
-	// and as the key of the HSet for the inode metadata.
+	if err := checkExpectedParent(ctx, p, parent.ID); err != nil {
+		return nil, false, err
+	}
 	id, err := c.allocInodeID(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-
 	now := nowMs()
-	inode := &inodeData{
-		ID:      id,
-		Parent:  parentInode.ID,
-		Name:    name,
-		Type:    "file",
-		Mode:    mode,
-		UID:     0,
-		GID:     0,
-		Size:    int64(len(content)),
-		CtimeMs: now,
-		MtimeMs: now,
-		AtimeMs: now,
-		Content: content,
-	}
+	inode := &inodeData{ID: id, Parent: parent.ID, Name: baseName(p), Type: "file", Mode: mode, Size: int64(len(content)), CtimeMs: now, MtimeMs: now, AtimeMs: now, Content: content}
 	if err := c.selectContentRef(ctx, inode); err != nil {
 		return nil, false, err
 	}
-
-	// Optimistic write: claim the name with HSETNX and unconditionally
-	// stage the inode + touch + counter bumps in the same pipeline. We do
-	// this in one go and inspect claim.Val() afterward. On a lost race the
-	// orphan inode and counter bumps are compensated below.
-	pipe := c.rdb.Pipeline()
-	claim := pipe.HSetNX(ctx, direntsKey, name, inode.ID)
-	// Content goes to the preferred external backend; metadata remains in the
-	// inode HASH.
-	rediscontent.QueueWriteFull(ctx, pipe, c.keys.content(inode.ID), inode.ContentRef, []byte(content))
-	pipe.HSet(ctx, c.keys.inode(inode.ID), mergeFieldMaps(c.inodeFieldsAtPath(inode, p, false), fileSearchIndexFields(content)))
-	if content != "" {
-		c.queueQueryDirty(ctx, pipe, inode.ID)
-	}
-	c.queueTouchTimes(pipe, parentInode.ID, now)
-	c.queueCreateInfo(pipe, inode)
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := checkWriteCondition(ctx, inode, true); err != nil {
 		return nil, false, err
 	}
-
-	if claim.Val() {
-		// Uncontended: we own the name. Update the parent's cached mtime
-		// in place, drop the parent's dir listing cache (now stale), and
-		// publish the invalidation.
-		parentCopy := *parentInode
-		parentCopy.MtimeMs = now
-		parentCopy.CtimeMs = now
-		c.cachePath(parentPath, &parentCopy)
+	stage, err := c.stageFullFile(ctx, inode)
+	if err != nil {
+		return nil, false, err
+	}
+	defer c.discardStage(stage)
+	err = c.publishStagedFile(ctx, p, inode, stage, true, fileSearchIndexFields(inode.Content))
+	if err == nil {
+		parent.MtimeMs = now
+		parent.CtimeMs = now
+		c.cachePath(parentPath, parent)
 		c.invalidateDirListing(ctx, parentPath)
 		c.publishInvalidate(ctx, InvalidateOpInode, p)
-		c.cachePath(p, inode)
 		return inode, true, nil
 	}
-
-	// Lost race: someone else won the HSETNX. Clean up the orphan inode,
-	// its content key, and compensating counter bumps in a single pipeline
-	// (one extra RTT on this rare path), then fall through to existing-file.
-	cleanup := c.rdb.Pipeline()
-	cleanup.Del(ctx, c.keys.inode(inode.ID))
-	cleanup.Del(ctx, c.keys.content(inode.ID))
-	cleanup.HIncrBy(ctx, c.keys.info(), "files", -1)
-	if inode.Size > 0 {
-		cleanup.HIncrBy(ctx, c.keys.info(), "total_data_bytes", -inode.Size)
-	}
-	if _, err := cleanup.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+	if !errors.Is(err, ErrWriteConflict) {
 		return nil, false, err
 	}
-
+	if _, conditional := ctx.Value(expectedStatKey{}).(expectedStat); conditional {
+		return nil, false, ErrWriteConflict
+	}
+	if parents, _ := ctx.Value(expectedParentsKey{}).(expectedParents); len(parents) > 0 {
+		return nil, false, ErrWriteConflict
+	}
 	if exclusive {
 		return nil, false, ErrAlreadyExists
 	}
-
-	// Re-resolve the existing child. Use HGet directly (not lookupChildID)
-	// so the redis.Nil case maps to a human-friendly error string for
-	// parity with the old retryWatch loser branch.
-	existingID, err := c.rdb.HGet(ctx, direntsKey, name).Result()
+	existingID, err := c.rdb.HGet(ctx, c.keys.dirents(parent.ID), baseName(p)).Result()
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			// The winner removed the entry between HSETNX and our HGet.
-			// Surface this as the same error the resolvePath family uses.
-			return nil, false, ErrNotFound
-		}
 		return nil, false, err
 	}
 	existing, err := c.loadInodeByID(ctx, existingID)
@@ -856,14 +729,20 @@ func (c *nativeClient) createFileIfMissing(ctx context.Context, p string, conten
 	if existing.Type != "file" {
 		return nil, false, ErrNotFile
 	}
-	// Nothing in the parent directory actually changed from our
-	// perspective, so we leave the parent's cache alone and only
-	// refresh the resolved path entry for the existing file.
 	c.cachePath(p, existing)
 	return existing, false, nil
 }
 
 func (c *nativeClient) renamePath(ctx context.Context, resolvedSrc string, srcInode *inodeData, dst string, newParent *inodeData, flags uint32) error {
+	if err := checkExpectedParent(ctx, resolvedSrc, srcInode.Parent); err != nil {
+		return err
+	}
+	if err := checkExpectedParent(ctx, dst, newParent.ID); err != nil {
+		return err
+	}
+	if err := checkWriteCondition(ctx, srcInode, false); err != nil {
+		return err
+	}
 	oldParentID := srcInode.Parent
 	oldName := srcInode.Name
 	newName := baseName(dst)
@@ -873,13 +752,22 @@ func (c *nativeClient) renamePath(ctx context.Context, resolvedSrc string, srcIn
 
 	var watchDstDirID string
 	for attempts := 0; attempts < 8; attempts++ {
-		keys := uniqueStrings(c.keys.dirents(oldParentID), c.keys.dirents(newParent.ID))
+		keys := uniqueStrings(c.keys.dirents(oldParentID), c.keys.dirents(newParent.ID), c.keys.inode(srcInode.ID))
+		parentKeys := uniqueStrings(c.keys.inode(oldParentID), c.keys.inode(newParent.ID))
+		keys = uniqueStrings(append(keys, parentKeys...)...)
 		if watchDstDirID != "" {
 			keys = uniqueStrings(append(keys, c.keys.dirents(watchDstDirID))...)
 		}
 
 		var nextDstDirID string
 		err := c.retryWatch(ctx, keys, func(tx *redis.Tx) error {
+			live, err := tx.Exists(ctx, parentKeys...).Result()
+			if err != nil {
+				return err
+			}
+			if live != int64(len(parentKeys)) {
+				return ErrWriteConflict
+			}
 			currentSrcID, err := tx.HGet(ctx, c.keys.dirents(oldParentID), oldName).Result()
 			if err != nil {
 				if errors.Is(err, redis.Nil) {
@@ -897,6 +785,9 @@ func (c *nativeClient) renamePath(ctx context.Context, resolvedSrc string, srcIn
 			}
 			if currentSrc == nil {
 				return ErrNotFound
+			}
+			if currentSrc.Revision != srcInode.Revision {
+				return ErrWriteConflict
 			}
 
 			var replaced *inodeData
@@ -959,12 +850,17 @@ func (c *nativeClient) renamePath(ctx context.Context, resolvedSrc string, srcIn
 					pipe.Del(ctx, c.keys.inode(replaced.ID))
 					if replaced.Type == "file" {
 						pipe.Del(ctx, c.keys.content(replaced.ID))
-						c.queueQueryDeleted(ctx, pipe, replaced.ID)
+
 					}
 					if replaced.Type == "dir" {
 						pipe.Del(ctx, c.keys.dirents(replaced.ID))
 					}
 					c.queueDeleteInfo(pipe, replaced)
+				}
+				pipe.Set(ctx, c.keys.rootDirty(), "1", 0)
+				c.queueInvalidation(ctx, pipe, InvalidateOpPrefix, resolvedSrc, dst)
+				if replaced != nil {
+					c.queueQueryDeleted(ctx, pipe, replaced.ID)
 				}
 				return nil
 			})
@@ -1070,8 +966,38 @@ func (c *nativeClient) allocInodeID(ctx context.Context) (string, error) {
 }
 
 func (c *nativeClient) retryWatch(ctx context.Context, keys []string, fn func(*redis.Tx) error) error {
+	generation, managed := ctx.Value(workspaceGenerationKey{}).(string)
+	lease := nativeLease(ctx)
+	if lease != "" {
+		keys = uniqueStrings(append(keys, lease)...)
+	}
+	if managed {
+		keys = uniqueStrings(append(keys, c.keys.generation())...)
+	}
+	guarded := func(tx *redis.Tx) error {
+		if lease != "" {
+			if exists, err := tx.Exists(ctx, lease).Result(); err != nil {
+				return err
+			} else if exists == 0 {
+				return ErrNativeSessionLost
+			}
+		}
+		if managed {
+			actual, err := tx.Get(ctx, c.keys.generation()).Result()
+			if errors.Is(err, redis.Nil) || (err == nil && actual != generation) {
+				return ErrWorkspaceChanged
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := c.watchExpectedParents(ctx, tx); err != nil {
+			return err
+		}
+		return fn(tx)
+	}
 	for attempts := 0; attempts < 16; attempts++ {
-		err := c.rdb.Watch(ctx, fn, keys...)
+		err := c.rdb.Watch(ctx, guarded, keys...)
 		if errors.Is(err, redis.TxFailedErr) {
 			continue
 		}
@@ -1119,22 +1045,20 @@ func (c *nativeClient) refreshIndexedSubtree(ctx context.Context, rootPath strin
 	if inode == nil || inode.ID == "" {
 		return nil
 	}
-	pipe := c.rdb.Pipeline()
-	if err := c.queueRefreshIndexedSubtree(ctx, pipe, rootPath, inode); err != nil {
+	return c.retryWatch(ctx, []string{c.keys.inode(inode.ID)}, func(tx *redis.Tx) error {
+		_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error { return c.queueRefreshIndexedSubtree(ctx, pipe, rootPath, inode) })
 		return err
-	}
-	_, err := pipe.Exec(ctx)
-	return err
+	})
 }
 
 func (c *nativeClient) queueRefreshIndexedSubtree(ctx context.Context, pipe redis.Pipeliner, currentPath string, inode *inodeData) error {
+	if inode.Type == "file" {
+		c.queueQueryDirty(ctx, pipe, inode.ID)
+	}
 	pipe.HSet(ctx, c.keys.inode(inode.ID), map[string]interface{}{
 		"path":           currentPath,
 		"path_ancestors": indexedPathAncestors(currentPath),
 	})
-	if inode.Type == "file" {
-		c.queueQueryDirty(ctx, pipe, inode.ID)
-	}
 	if inode.Type != "dir" {
 		return nil
 	}
@@ -1172,14 +1096,6 @@ func (c *nativeClient) queueCreateInfo(pipe redis.Pipeliner, inode *inodeData) {
 	}
 }
 
-func (c *nativeClient) queueQueryDirty(ctx context.Context, pipe redis.Pipeliner, inodeID string) {
-	queryindex.QueueMarkDirty(ctx, pipe, c.key, inodeID)
-}
-
-func (c *nativeClient) queueQueryDeleted(ctx context.Context, pipe redis.Pipeliner, inodeID string) {
-	queryindex.QueueMarkDeleted(ctx, pipe, c.key, inodeID)
-}
-
 func (c *nativeClient) queueDeleteInfo(pipe redis.Pipeliner, inode *inodeData) {
 	switch inode.Type {
 	case "file":
@@ -1204,13 +1120,6 @@ func (c *nativeClient) queueTouchTimes(pipe redis.Pipeliner, inodeID string, ts 
 	})
 }
 
-func (c *nativeClient) adjustTotalData(ctx context.Context, delta int64) error {
-	if delta == 0 {
-		return nil
-	}
-	return c.rdb.HIncrBy(ctx, c.keys.info(), "total_data_bytes", delta).Err()
-}
-
 func (c *nativeClient) markRootDirty(ctx context.Context) error {
 	// Throttle: within the debounce window, skip the Redis round trip.
 	// See the comment on nativeClient.dirtyMu for rationale.
@@ -1221,8 +1130,28 @@ func (c *nativeClient) markRootDirty(ctx context.Context) error {
 	}
 	c.dirtyLastSent = time.Now()
 	c.dirtyMu.Unlock()
+	if generation, managed := ctx.Value(workspaceGenerationKey{}).(string); managed {
+		code, err := markRootDirtyGuarded.Run(ctx, c.rdb, []string{c.keys.rootDirty(), c.keys.generation(), c.leaseGuardKey(ctx)}, generation).Int()
+		if err != nil {
+			return err
+		}
+		if code == -2 {
+			return ErrWorkspaceChanged
+		}
+		if code == -5 {
+			return ErrNativeSessionLost
+		}
+		return nil
+	}
 	return c.rdb.Set(ctx, c.keys.rootDirty(), "1", 0).Err()
 }
+
+var markRootDirtyGuarded = redis.NewScript(`
+if redis.call('GET',KEYS[2])~=ARGV[1] then return -2 end
+if KEYS[3]~=KEYS[2] and redis.call('EXISTS',KEYS[3])==0 then return -5 end
+redis.call('SET',KEYS[1],'1')
+return 1
+`)
 
 func (c *nativeClient) cachePath(p string, inode *inodeData) {
 	if c.cache == nil || inode == nil {
@@ -1284,6 +1213,9 @@ func inodeFromValues(id string, vals []interface{}) *inodeData {
 	// content_ref was added after the initial schema; tolerate its absence.
 	if len(vals) > 11 {
 		inode.ContentRef = toStr(vals[11])
+	}
+	if len(vals) > 12 {
+		inode.Revision = toStr(vals[12])
 	}
 	return inode
 }

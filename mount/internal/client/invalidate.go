@@ -128,10 +128,33 @@ var ErrStreamTrimmed = errors.New("change stream: saved position was trimmed, fu
 func newOriginID() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		// rand.Read on modern OSes does not fail in practice, but if it
-		// ever did, fall back to a constant so we still boot. Dedup will
-		// be broken for that process but correctness is unaffected.
-		return "origin-fallback"
+		panic("cannot create unique filesystem publication identity: " + err.Error())
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+func (c *nativeClient) invalidationPayload(op string, paths ...string) string {
+	payload, _ := encodeInvalidate(InvalidateEvent{Origin: c.originID, Op: op, Paths: paths})
+	return string(payload)
+}
+
+// A same-slot sentinel suppresses Pub/Sub without suppressing the journal.
+func (c *nativeClient) notificationChannel() string {
+	if c.publishDisabled.Load() {
+		return c.keys.generation()
+	}
+	return c.keys.invalidateChannel()
+}
+
+// queueInvalidation puts the existing durable stream and live notification in
+// the same Redis transaction as a namespace mutation.
+func (c *nativeClient) queueInvalidation(ctx context.Context, pipe redis.Pipeliner, op string, paths ...string) {
+	payload := c.invalidationPayload(op, paths...)
+	if payload == "" {
+		return
+	}
+	pipe.XAdd(ctx, &redis.XAddArgs{Stream: c.keys.changesStream(), MaxLen: 10000, Approx: true, Values: map[string]interface{}{"payload": payload}})
+	if !c.publishDisabled.Load() {
+		pipe.Publish(ctx, c.keys.invalidateChannel(), payload)
+	}
 }
